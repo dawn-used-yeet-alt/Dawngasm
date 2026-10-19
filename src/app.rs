@@ -65,6 +65,14 @@ impl View {
 pub(crate) enum InputMode {
     Search,
     Tags,
+    BlockedTags,
+}
+
+impl InputMode {
+    /// Both tag prompts use the same `/tags` autocomplete machinery.
+    fn is_tag_mode(self) -> bool {
+        matches!(self, InputMode::Tags | InputMode::BlockedTags)
+    }
 }
 
 /// Work for the feed worker.
@@ -73,6 +81,7 @@ enum Command {
         sort: String,
         period: String,
         tags: String,
+        exclude_tags: String,
         query: String,
         page: usize,
         generation: u64,
@@ -129,6 +138,8 @@ pub struct App {
     query: String,
     /// Comma-separated tag filter, ANDed with the text search by the API.
     pub(crate) tags: String,
+    /// Comma-separated tags whose posts are hidden by the API.
+    pub(crate) blocked_tags: String,
     /// `Some` while a filter prompt is open; holds the in-progress text.
     pub(crate) input: Option<String>,
     pub(crate) input_mode: InputMode,
@@ -211,6 +222,7 @@ impl App {
             period: period_index(&feed.period),
             query: feed.query,
             tags: feed.tags,
+            blocked_tags: feed.blocked_tags,
             input: None,
             input_mode: InputMode::Search,
             suggestions: Vec::new(),
@@ -327,6 +339,10 @@ impl App {
         &self.tags
     }
 
+    pub(crate) fn blocked_tags(&self) -> &str {
+        &self.blocked_tags
+    }
+
     pub(crate) fn suggestions(&self) -> &[TagSuggestion] {
         &self.suggestions
     }
@@ -339,7 +355,7 @@ impl App {
     /// matches shows nothing rather than an empty box.
     pub(crate) fn suggestions_visible(&self) -> bool {
         self.input.is_some()
-            && self.input_mode == InputMode::Tags
+            && self.input_mode.is_tag_mode()
             && !self.suggestions_hidden
             && !self.suggestions.is_empty()
     }
@@ -452,6 +468,7 @@ impl App {
 
             Char('/') => self.begin_input(InputMode::Search),
             Char('T') => self.begin_input(InputMode::Tags),
+            Char('B') => self.begin_input(InputMode::BlockedTags),
             Char('r') => self.request_page(self.page),
             Char(']') => self.next_page(),
             Char('[') => self.prev_page(),
@@ -512,6 +529,7 @@ impl App {
         self.input = Some(match mode {
             InputMode::Search => self.query.clone(),
             InputMode::Tags => self.tags.clone(),
+            InputMode::BlockedTags => self.blocked_tags.clone(),
         });
         self.input_changed();
     }
@@ -526,6 +544,7 @@ impl App {
         match self.input_mode {
             InputMode::Search => self.query = value,
             InputMode::Tags => self.tags = value,
+            InputMode::BlockedTags => self.blocked_tags = value,
         }
         self.clear_suggestions();
         self.request_page(0);
@@ -537,7 +556,7 @@ impl App {
     fn input_changed(&mut self) {
         self.suggestion_generation = self.suggestion_generation.wrapping_add(1);
         self.clear_suggestions();
-        if self.input.is_some() && self.input_mode == InputMode::Tags {
+        if self.input.is_some() && self.input_mode.is_tag_mode() {
             let fragment = active_tag_fragment(self.input.as_deref().unwrap_or(""));
             if fragment.chars().count() >= MIN_TAG_PREFIX {
                 self.suggestion_due = Some(Instant::now() + SUGGEST_DELAY);
@@ -562,7 +581,7 @@ impl App {
             return;
         }
         self.suggestion_due = None;
-        if self.input.is_none() || self.input_mode != InputMode::Tags || self.suggestions_hidden {
+        if self.input.is_none() || !self.input_mode.is_tag_mode() || self.suggestions_hidden {
             return;
         }
         let fragment = active_tag_fragment(self.input.as_deref().unwrap_or(""));
@@ -680,6 +699,7 @@ impl App {
                 sort: SORTS[self.sort].to_string(),
                 period: PERIODS[self.period].to_string(),
                 tags: self.tags.clone(),
+                exclude_tags: self.blocked_tags.clone(),
                 query: self.query.clone(),
                 page: self.page,
                 generation: self.load_generation,
@@ -1000,6 +1020,7 @@ impl App {
             SORTS[self.sort],
             PERIODS[self.period],
             &self.tags,
+            &self.blocked_tags,
             &self.query,
             self.page,
             self.has_more,
@@ -1119,7 +1140,7 @@ impl App {
                     // or one that arrived after the dropdown was dismissed.
                     if generation == self.suggestion_generation
                         && self.input.is_some()
-                        && self.input_mode == InputMode::Tags
+                        && self.input_mode.is_tag_mode()
                         && !self.suggestions_hidden
                     {
                         self.suggestions = tags;
@@ -1146,10 +1167,11 @@ fn feed_worker(commands: Receiver<Command>, events: Sender<Event>) {
                 sort,
                 period,
                 tags,
+                exclude_tags,
                 query,
                 page,
                 generation,
-            } => match client.fetch_posts(&sort, &period, &tags, &query, page) {
+            } => match client.fetch_posts(&sort, &period, &tags, &exclude_tags, &query, page) {
                 Ok((posts, has_more)) => Event::FeedLoaded {
                     posts,
                     has_more,
