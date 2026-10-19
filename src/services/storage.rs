@@ -31,6 +31,8 @@ struct FeedSessionFile {
     #[serde(default)]
     tags: String,
     #[serde(default)]
+    blocked_tags: String,
+    #[serde(default)]
     query: String,
     #[serde(default)]
     current_page: i64,
@@ -66,6 +68,7 @@ pub struct FeedSession {
     pub sort: String,
     pub period: String,
     pub tags: String,
+    pub blocked_tags: String,
     pub query: String,
     pub current_page: usize,
     pub has_more: bool,
@@ -79,6 +82,7 @@ impl Default for FeedSession {
             sort: "top".into(),
             period: "day".into(),
             tags: String::new(),
+            blocked_tags: String::new(),
             query: String::new(),
             current_page: 0,
             has_more: false,
@@ -211,6 +215,7 @@ impl Storage {
         sort: &str,
         period: &str,
         tags: &str,
+        blocked_tags: &str,
         query: &str,
         current_page: usize,
         has_more: bool,
@@ -228,6 +233,7 @@ impl Storage {
                 period.into()
             },
             tags: tags.into(),
+            blocked_tags: blocked_tags.into(),
             query: query.into(),
             current_page: current_page as i64,
             has_more,
@@ -256,6 +262,7 @@ impl Storage {
             session.period = stored.period;
         }
         session.tags = stored.tags;
+        session.blocked_tags = stored.blocked_tags;
         session.query = stored.query;
         session.current_page = stored.current_page.clamp(0, MAX_PAGE_INDEX as i64) as usize;
         session.has_more = stored.has_more;
@@ -572,12 +579,22 @@ mod tests {
     fn feed_session_round_trips() {
         let dir = temp_dir("feed");
         let storage = Storage::in_dir(&dir).unwrap();
-        storage.save_feed_session("top", "week", "f4m,ramblefap", "gentle dom", 2, true, 240.5);
+        storage.save_feed_session(
+            "top",
+            "week",
+            "f4m,ramblefap",
+            "m4f,m4a",
+            "gentle dom",
+            2,
+            true,
+            240.5,
+        );
         let loaded = storage.load_feed_session();
         assert!(loaded.found);
         assert_eq!(loaded.sort, "top");
         assert_eq!(loaded.period, "week");
         assert_eq!(loaded.tags, "f4m,ramblefap");
+        assert_eq!(loaded.blocked_tags, "m4f,m4a");
         assert_eq!(loaded.query, "gentle dom");
         assert_eq!(loaded.current_page, 2);
         assert!(loaded.has_more);
@@ -594,6 +611,7 @@ mod tests {
         assert_eq!(loaded.sort, "top");
         assert_eq!(loaded.period, "day");
         assert!(loaded.tags.is_empty());
+        assert!(loaded.blocked_tags.is_empty());
         assert!(!loaded.has_more);
         let _ = fs::remove_dir_all(&dir);
     }
@@ -616,6 +634,10 @@ mod tests {
         assert_eq!(loaded.sort, "hot");
         assert_eq!(loaded.period, "hour");
         assert!(loaded.tags.is_empty(), "a legacy file has no tag filter");
+        assert!(
+            loaded.blocked_tags.is_empty(),
+            "a legacy file has no blocklist"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -623,7 +645,7 @@ mod tests {
     fn feed_session_clamps_a_page_past_the_api_limit() {
         let dir = temp_dir("feed-clamp");
         let storage = Storage::in_dir(&dir).unwrap();
-        storage.save_feed_session("top", "day", "", "", 900, false, 0.0);
+        storage.save_feed_session("top", "day", "", "", "", 900, false, 0.0);
         assert_eq!(storage.load_feed_session().current_page, 99);
         let _ = fs::remove_dir_all(&dir);
     }

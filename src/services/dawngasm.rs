@@ -106,15 +106,17 @@ impl DawngasmClient {
     ///
     /// `sort` is one of the API's sorts (`top`, `new`, `relevance`), `period`
     /// is this client's window name (`day`, `week`, `month`, `year`, `all`),
-    /// and `tags` is the comma-separated tag filter (`f4m,ramblefap`). Tags
-    /// and search text are ANDed by the API, and either may be empty. Posts
-    /// whose title or body carries no supported audio link are dropped, exactly
-    /// as the old Reddit listing parser did.
+    /// `tags` is the comma-separated tag filter (`f4m,ramblefap`), and
+    /// `exclude_tags` is the comma-separated blocklist. Tags and search text
+    /// are ANDed by the API, and either may be empty. Posts whose title or body
+    /// carries no supported audio link are dropped, exactly as the old Reddit
+    /// listing parser did.
     pub fn fetch_posts(
         &mut self,
         sort: &str,
         period: &str,
         tags: &str,
+        exclude_tags: &str,
         query: &str,
         page: usize,
     ) -> Result<(Vec<Post>, bool)> {
@@ -129,6 +131,10 @@ impl DawngasmClient {
         if !tags.is_empty() {
             url.push_str("&tags=");
             url.push_str(&percent_encode(tags));
+        }
+        if !exclude_tags.is_empty() {
+            url.push_str("&excludeTags=");
+            url.push_str(&percent_encode(exclude_tags));
         }
         if !query.is_empty() {
             url.push_str("&text=");
@@ -282,8 +288,8 @@ struct SearchPage {
     needs_bodies: bool,
 }
 
-/// Parses a `/search` response. Posts with a title the hosts cannot serve are
-/// dropped here; the audio-link filter runs after the body fields are known.
+/// Parses a `/search` response. The audio-link filter runs after the body
+/// fields are known.
 fn parse_search_response(body: &str) -> Result<SearchPage> {
     let root: Value = serde_json::from_str(body)
         .map_err(|e| err(format!("invalid response from the dawngasm API: {e}")))?;
@@ -320,9 +326,6 @@ fn parse_search_response(body: &str) -> Result<SearchPage> {
             continue;
         }
         let title = string_cell(row, title_col);
-        if should_filter_title(&title) {
-            continue;
-        }
         posts.push(Post {
             id: id.clone(),
             name: format!("t3_{id}"),
@@ -444,12 +447,6 @@ fn int_cell(row: &[Value], index: Option<usize>) -> i64 {
         .unwrap_or(0)
 }
 
-/// Drops the titles the audio hosts cannot serve, matching the old feed.
-pub fn should_filter_title(title: &str) -> bool {
-    let upper = title.to_uppercase();
-    upper.contains("M4A") || upper.contains("M4F")
-}
-
 /// Whether a post resolves to something the app can actually play.
 ///
 /// The index is full of posts that only *point at* audio elsewhere — script
@@ -492,12 +489,12 @@ mod tests {
     }"#;
 
     #[test]
-    fn parses_a_search_page_and_filters_bad_titles() {
+    fn parses_a_search_page_without_dropping_titles() {
         let page = parse_search_response(SEARCH).unwrap();
         assert!(page.has_more);
         assert!(page.needs_bodies);
         let names: Vec<&str> = page.posts.iter().map(|post| post.name.as_str()).collect();
-        assert_eq!(names, ["t3_abc", "t3_ghi"]);
+        assert_eq!(names, ["t3_abc", "t3_def", "t3_ghi"]);
         assert_eq!(page.posts[0].id, "abc");
         assert_eq!(page.posts[0].author, "alice");
         assert_eq!(page.posts[0].score, 12);
@@ -587,14 +584,6 @@ mod tests {
     fn malformed_json_is_an_error() {
         let error = parse_search_response("not json at all").unwrap_err();
         assert!(error.0.contains("invalid response"));
-    }
-
-    #[test]
-    fn filters_m4a_and_m4f_case_insensitively() {
-        assert!(should_filter_title("Listen to my M4A"));
-        assert!(should_filter_title("listen to my m4a"));
-        assert!(should_filter_title("An m4F audio"));
-        assert!(!should_filter_title("[FF4M] A normal title"));
     }
 
     #[test]

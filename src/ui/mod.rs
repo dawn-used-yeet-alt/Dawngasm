@@ -21,7 +21,7 @@ use crate::services::audio::{format_time, PlayerStatus};
 
 /// The always-visible key hints, shown when nothing more urgent is in the
 /// footer.
-const HINTS: &str = " ? help  / search  T tags  Enter play  Space pause  n/p track  ←/→ seek  -/+ vol  s save  t sort  e window  Tab view  q quit";
+const HINTS: &str = " ? help  / search  T tags  B block  Enter play  Space pause  n/p track  ←/→ seek  -/+ vol  s save  t sort  e window  Tab view  q quit";
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let chunks = Layout::vertical([
@@ -105,6 +105,12 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
     if !app.tags().is_empty() {
         spans.push(Span::styled(
             format!("  tags “{}”", app.tags()),
+            theme::muted(),
+        ));
+    }
+    if !app.blocked_tags().is_empty() {
+        spans.push(Span::styled(
+            format!("  blocked “{}”", app.blocked_tags()),
             theme::muted(),
         ));
     }
@@ -360,6 +366,7 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
         let label = match app.input_mode {
             InputMode::Search => "Search: ",
             InputMode::Tags => "Tags: ",
+            InputMode::BlockedTags => "Blocked tags: ",
         };
         let hint = if app.suggestions_visible() {
             "   ↑/↓ select · Tab complete · Enter submit · Esc hide"
@@ -428,14 +435,18 @@ fn draw_suggestions(frame: &mut Frame, app: &App, area: Rect) {
         })
         .collect();
     let block = ratatui::widgets::Block::bordered()
-        .title(" Tags ")
+        .title(if app.input_mode == InputMode::BlockedTags {
+            " Blocked tags "
+        } else {
+            " Tags "
+        })
         .border_style(theme::title());
     frame.render_widget(Clear, popup);
     frame.render_widget(Paragraph::new(lines).block(block), popup);
 }
 
 fn draw_help(frame: &mut Frame, area: Rect) {
-    let keys: [(&str, &str); 22] = [
+    let keys: [(&str, &str); 23] = [
         ("j / k, ↑ / ↓", "move the selection"),
         ("g / G, Home / End", "jump to the first or last post"),
         ("PgDn / PgUp, Ctrl-d / Ctrl-u", "move a page at a time"),
@@ -452,6 +463,7 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         ("f / v / y", "go straight to Feed / Saved / History"),
         ("/", "search every indexed subreddit"),
         ("T", "edit tag filters with /tags autocomplete"),
+        ("B", "block tags with /tags autocomplete"),
         ("[ / ]", "previous or next page"),
         ("t", "cycle the sort (top → new → relevance)"),
         ("e", "cycle the time window (switches sort to top)"),
