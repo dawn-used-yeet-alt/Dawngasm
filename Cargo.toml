@@ -53,7 +53,7 @@ hotaudio = { package = "hotaudio-rs", git = "https://github.com/dawn-used-yeet-a
 # async object server an executor to run on. D-Bus integration is Linux-only;
 # the stub module keeps the app's interface identical elsewhere.
 [target.'cfg(target_os = "linux")'.dependencies]
-zbus = "5"
+zbus = "6"
 async-io = "2"
 
 [dev-dependencies]
