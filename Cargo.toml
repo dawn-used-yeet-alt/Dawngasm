@@ -1,0 +1,64 @@
+[package]
+name = "audiogasm-tui"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "GPL-3.0-or-later"
+description = "Audiogasm TUI: browse and play audio posts from the dawngasm index in a terminal."
+publish = false
+
+[lib]
+name = "audiogasm_tui"
+path = "src/lib.rs"
+
+[[bin]]
+name = "audiogasm-tui"
+path = "src/main.rs"
+
+[dependencies]
+# Terminal UI + its crossterm backend (re-exported as `ratatui::crossterm`).
+ratatui = "0.30"
+
+# Audio output only. rodio's own decoders are deliberately off: it pins
+# symphonia 0.5, which cannot read hotaudio's fragmented MP4. We decode with
+# symphonia 0.6 below and hand rodio a `Source` of our own.
+rodio = { version = "0.23", default-features = false, features = ["playback"] }
+
+# Decoding. `isomp4` + `aac` cover soundgasm/audiochan/hotaudio (m4a / fMP4),
+# `mp3`/`flac` cover whyp. `opt-simd` keeps the hot loops on AES/SHA paths.
+symphonia = { version = "0.6", default-features = false, features = [
+    "aac",
+    "isomp4",
+    "mp3",
+    "flac",
+    "opt-simd",
+] }
+
+# HTTP (the dawngasm API plus the audio hosts). `cookies` is load-bearing for
+# audiochan: the play-intent cookie has to ride the ranged stream requests too.
+ureq = { version = "3", default-features = false, features = ["rustls", "gzip", "cookies"] }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+regex = "1"
+anyhow = "1"
+# Early error reporting + a decent backtrace without hand-rolling it.
+thiserror = "2"
+
+# The hotaudio protocol client, at the latest released revision. The desktop
+# app used an old pinned commit of this same crate.
+hotaudio = { package = "hotaudio-rs", git = "https://github.com/dawn-used-yeet-alt/hotaudio-extractor.git", rev = "4966c7040805b98ac272c178ba34a45b6a76264c" }
+
+# MPRIS over D-Bus for media keys and desktop panels. async-io gives zbus'
+# async object server an executor to run on. D-Bus integration is Linux-only;
+# the stub module keeps the app's interface identical elsewhere.
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus = "5"
+async-io = "2"
+
+[dev-dependencies]
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
