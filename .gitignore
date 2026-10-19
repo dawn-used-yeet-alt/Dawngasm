@@ -1,0 +1,16 @@
+# Cargo build artifacts
+/target/
+
+# Local environment overrides (DAWNGASM_API_URL, etc.)
+.env
+.env.*
+
+# Release packaging output
+/dist/
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.swp

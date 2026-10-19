@@ -1,0 +1,117 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  licenses:
+    name: Third-party licenses
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: baptiste0928/cargo-install@v3
+        with:
+          crate: cargo-about
+          features: cli
+      - name: Generate license notice
+        run: cargo about generate about.hbs > THIRD_PARTY_LICENSES.md
+      - uses: actions/upload-artifact@v7
+        with:
+          name: licenses
+          path: THIRD_PARTY_LICENSES.md
+          if-no-files-found: error
+
+  build:
+    name: Build (${{ matrix.target }})
+    needs: licenses
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: licenses
+          path: .
+      - name: Install audio headers
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Build
+        run: cargo build --locked --release --target ${{ matrix.target }}
+
+      - name: Package (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          name="audiogasm-tui-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          mkdir -p "dist/$name"
+          cp "target/${{ matrix.target }}/release/audiogasm-tui" "dist/$name/"
+          cp LICENSE README.md THIRD_PARTY_LICENSES.md "dist/$name/"
+          tar -czf "$name.tar.gz" -C dist "$name"
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $name = "audiogasm-tui-${{ github.ref_name }}-${{ matrix.target }}"
+          New-Item -ItemType Directory -Force "dist/$name" | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/audiogasm-tui.exe" "dist/$name/"
+          Copy-Item LICENSE, README.md, THIRD_PARTY_LICENSES.md "dist/$name/"
+          Compress-Archive -Path "dist/$name/*" -DestinationPath "$name.zip"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: audiogasm-tui-${{ matrix.target }}
+          path: audiogasm-tui-*
+          if-no-files-found: error
+
+  publish:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          merge-multiple: true
+      - uses: actions/download-artifact@v8
+        with:
+          name: licenses
+          path: artifacts
+      - name: Write checksums
+        working-directory: artifacts
+        run: sha256sum * > SHA256SUMS.txt
+      - uses: softprops/action-gh-release@v3
+        with:
+          files: artifacts/*
+          fail_on_unmatched_files: true
+          generate_release_notes: true

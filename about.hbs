@@ -1,0 +1,29 @@
+# Third-party licenses
+
+Dawngasm includes the third-party crates listed below. License texts are
+grouped by license, and each group names the crates that use it.
+
+## Overview
+
+{{#each overview}}
+- {{name}} ({{count}})
+{{/each}}
+
+## License texts
+
+{{#each licenses}}
+{{#if first_of_kind}}
+### {{name}}
+{{/if}}
+
+Used by:
+
+{{#each used_by}}
+- {{crate.name}} {{crate.version}}{{#if crate.repository}} ({{crate.repository}}){{/if}}
+{{/each}}
+
+<pre>
+{{text}}
+</pre>
+
+{{/each}}
