@@ -13,9 +13,9 @@ env:
 jobs:
   licenses:
     name: Third-party licenses
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: baptiste0928/cargo-install@v3
         with:
@@ -23,7 +23,7 @@ jobs:
           features: cli
       - name: Generate license notice
         run: cargo about generate about.hbs > THIRD_PARTY_LICENSES.md
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: licenses
           path: THIRD_PARTY_LICENSES.md
@@ -37,7 +37,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
@@ -48,8 +48,8 @@ jobs:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           name: licenses
           path: .
@@ -86,7 +86,7 @@ jobs:
           Copy-Item LICENSE, README.md, THIRD_PARTY_LICENSES.md "dist/$name/"
           Compress-Archive -Path "dist/$name/*" -DestinationPath "$name.zip"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: audiogasm-tui-${{ matrix.target }}
           path: audiogasm-tui-*
@@ -95,22 +95,22 @@ jobs:
   publish:
     name: Publish release
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
           merge-multiple: true
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: licenses
           path: artifacts
       - name: Write checksums
         working-directory: artifacts
         run: sha256sum * > SHA256SUMS.txt
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           files: artifacts/*
           fail_on_unmatched_files: true
