@@ -483,6 +483,7 @@ impl MprisPlayer {
         self.send(Command::SeekAbsolute((position_us / 1000).max(0)));
     }
 
+    #[allow(clippy::needless_pass_by_value)] // D-Bus supplies an owned string.
     fn open_uri(&self, uri: String) {
         let _ = uri;
     }

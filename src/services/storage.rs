@@ -151,8 +151,8 @@ impl Storage {
             history: Vec::new(),
         };
         let mut storage = storage;
-        storage.saved = storage.load_posts(&storage.saved_path.clone());
-        storage.history = storage.load_posts(&storage.history_path.clone());
+        storage.saved = Storage::load_posts(&storage.saved_path.clone());
+        storage.history = Storage::load_posts(&storage.history_path.clone());
         Ok(storage)
     }
 
@@ -195,7 +195,7 @@ impl Storage {
             self.saved.insert(0, post.clone());
             true
         };
-        self.write_posts(&self.saved_path, &self.saved);
+        Self::write_posts(&self.saved_path, &self.saved);
         now_saved
     }
 
@@ -208,12 +208,12 @@ impl Storage {
         }
         self.history.insert(0, post.clone());
         self.history.truncate(MAX_HISTORY);
-        self.write_posts(&self.history_path, &self.history);
+        Self::write_posts(&self.history_path, &self.history);
     }
 
     pub fn clear_history(&mut self) {
         self.history.clear();
-        self.write_posts(&self.history_path, &self.history);
+        Self::write_posts(&self.history_path, &self.history);
     }
 
     // --- feed session ------------------------------------------------------
@@ -394,8 +394,8 @@ impl Storage {
 
         self.saved = saved;
         self.history = history;
-        self.write_posts(&self.saved_path, &self.saved);
-        self.write_posts(&self.history_path, &self.history);
+        Self::write_posts(&self.saved_path, &self.saved);
+        Self::write_posts(&self.history_path, &self.history);
         true
     }
 
@@ -453,11 +453,11 @@ impl Storage {
         }
     }
 
-    fn write_posts(&self, path: &Path, posts: &[Post]) {
+    fn write_posts(path: &Path, posts: &[Post]) {
         Self::write_json(path, &posts);
     }
 
-    fn load_posts(&self, path: &Path) -> Vec<Post> {
+    fn load_posts(path: &Path) -> Vec<Post> {
         Self::read_json::<Vec<Post>>(path).unwrap_or_default()
     }
 }

@@ -604,7 +604,7 @@ impl App {
         }
     }
 
-    fn move_suggestion(&mut self, delta: isize) {
+    const fn move_suggestion(&mut self, delta: isize) {
         if !self.suggestions_visible() {
             return;
         }
@@ -945,11 +945,10 @@ impl App {
     }
 
     fn poll_audio(&mut self) {
-        let events = if let Some(engine) = self.engine.as_mut() {
-            engine.poll()
-        } else {
-            Vec::new()
-        };
+        let events = self
+            .engine
+            .as_mut()
+            .map_or_else(Vec::new, |engine| engine.poll());
         let mut started = false;
         for event in events {
             match event {

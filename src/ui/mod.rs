@@ -350,11 +350,9 @@ fn progress_bar(width: usize, position_ms: i64, duration_ms: i64, seekable: bool
     let position = u128::try_from(position_ms.max(0)).unwrap_or(0);
     let duration = u128::try_from(duration_ms).unwrap_or(0);
     let track_width = u128::try_from(width).unwrap_or(u128::MAX);
-    let filled = if duration == 0 {
-        0
-    } else {
-        (track_width * position.min(duration) + duration / 2) / duration
-    };
+    let filled = (track_width * position.min(duration) + duration / 2)
+        .checked_div(duration)
+        .unwrap_or(0);
     let filled = usize::try_from(filled).unwrap_or(width).min(width);
     let mut bar = String::with_capacity(width);
     for cell in 0..width {
@@ -397,23 +395,28 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn footer_status_line(app: &App) -> Line<'static> {
-    if let Some(toast) = &app.toast {
-        let style = if app.toast_error {
-            theme::error()
-        } else {
-            theme::toast()
-        };
-        Line::from(Span::styled(format!(" {toast}"), style))
-    } else if !app.status.is_empty() {
-        let style = if app.status_is_error {
-            theme::error()
-        } else {
-            theme::muted()
-        };
-        Line::from(Span::styled(format!(" {}", app.status), style))
-    } else {
-        Line::from(Span::styled(HINTS, theme::faint()))
-    }
+    app.toast.as_ref().map_or_else(
+        || {
+            if app.status.is_empty() {
+                Line::from(Span::styled(HINTS, theme::faint()))
+            } else {
+                let style = if app.status_is_error {
+                    theme::error()
+                } else {
+                    theme::muted()
+                };
+                Line::from(Span::styled(format!(" {}", app.status), style))
+            }
+        },
+        |toast| {
+            let style = if app.toast_error {
+                theme::error()
+            } else {
+                theme::toast()
+            };
+            Line::from(Span::styled(format!(" {toast}"), style))
+        },
+    )
 }
 
 /// Draws the tag autocomplete dropdown just above the footer. It is transient
