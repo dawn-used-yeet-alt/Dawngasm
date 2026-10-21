@@ -151,8 +151,8 @@ impl Storage {
             history: Vec::new(),
         };
         let mut storage = storage;
-        storage.saved = Storage::load_posts(&storage.saved_path.clone());
-        storage.history = Storage::load_posts(&storage.history_path.clone());
+        storage.saved = Self::load_posts(&storage.saved_path.clone());
+        storage.history = Self::load_posts(&storage.history_path.clone());
         Ok(storage)
     }
 

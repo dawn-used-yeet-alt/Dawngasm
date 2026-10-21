@@ -948,7 +948,7 @@ impl App {
         let events = self
             .engine
             .as_mut()
-            .map_or_else(Vec::new, |engine| engine.poll());
+            .map_or_else(Vec::new, super::services::audio::AudioEngine::poll);
         let mut started = false;
         for event in events {
             match event {
