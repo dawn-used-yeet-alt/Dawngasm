@@ -43,7 +43,7 @@ impl HttpMediaSource {
         url: impl Into<String>,
         headers: Vec<(String, String)>,
     ) -> io::Result<Self> {
-        let mut source = HttpMediaSource {
+        let mut source = Self {
             agent,
             url: url.into(),
             headers,
@@ -60,6 +60,7 @@ impl HttpMediaSource {
 
     /// A browser UA is required by every host; sharing it with the extractors
     /// keeps their requests indistinguishable.
+    #[must_use]
     pub fn browser_agent() -> ureq::Agent {
         ureq::Agent::config_builder()
             .user_agent(BROWSER_UA)
@@ -67,15 +68,17 @@ impl HttpMediaSource {
             .new_agent()
     }
 
-    pub fn len(&self) -> u64 {
+    #[must_use]
+    pub const fn len(&self) -> u64 {
         self.len
     }
 
-    pub fn is_empty(&self) -> bool {
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
         self.len == 0
     }
 
-    fn chunk_covers(&self, pos: u64) -> bool {
+    const fn chunk_covers(&self, pos: u64) -> bool {
         pos >= self.chunk_start && pos - self.chunk_start < self.chunk.len() as u64
     }
 

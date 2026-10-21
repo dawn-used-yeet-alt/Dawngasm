@@ -300,10 +300,7 @@ fn progress_line(app: &App, width: usize, host: Option<AudioHost>) -> Line<'stat
         "--:--".to_string()
     };
     let volume = format!("{:>3}%", (app.volume * 100.0).round() as i32);
-    let host_label = host
-        .map(|host| theme::host(host).1)
-        .unwrap_or("—")
-        .to_string();
+    let host_label = host.map_or("—", |host| theme::host(host).1).to_string();
 
     let fixed = position.chars().count()
         + duration.chars().count()

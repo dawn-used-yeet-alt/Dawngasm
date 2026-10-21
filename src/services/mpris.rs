@@ -52,27 +52,27 @@ pub enum PlaybackStatus {
 }
 
 impl PlaybackStatus {
-    fn as_str(self) -> &'static str {
+    const fn as_str(self) -> &'static str {
         match self {
-            PlaybackStatus::Stopped => "Stopped",
-            PlaybackStatus::Playing => "Playing",
-            PlaybackStatus::Paused => "Paused",
+            Self::Stopped => "Stopped",
+            Self::Playing => "Playing",
+            Self::Paused => "Paused",
         }
     }
 
-    fn to_u8(self) -> u8 {
+    const fn to_u8(self) -> u8 {
         match self {
-            PlaybackStatus::Stopped => 0,
-            PlaybackStatus::Playing => 1,
-            PlaybackStatus::Paused => 2,
+            Self::Stopped => 0,
+            Self::Playing => 1,
+            Self::Paused => 2,
         }
     }
 
-    fn from_u8(value: u8) -> Self {
+    const fn from_u8(value: u8) -> Self {
         match value {
-            1 => PlaybackStatus::Playing,
-            2 => PlaybackStatus::Paused,
-            _ => PlaybackStatus::Stopped,
+            1 => Self::Playing,
+            2 => Self::Paused,
+            _ => Self::Stopped,
         }
     }
 }
@@ -90,7 +90,7 @@ struct Snapshot {
 
 impl Snapshot {
     fn new() -> Self {
-        Snapshot {
+        Self {
             status: AtomicU8::new(PlaybackStatus::Stopped.to_u8()),
             position_ms: AtomicI64::new(0),
             duration_ms: AtomicI64::new(0),
@@ -183,7 +183,8 @@ impl Mpris {
     ///
     /// Returns an inert handle if the zbus thread cannot be spawned; the caller
     /// keeps working either way.
-    pub fn start() -> Option<Mpris> {
+    #[must_use]
+    pub fn start() -> Option<Self> {
         let snapshot = Arc::new(Snapshot::new());
         let (sender, commands) = mpsc::channel();
         let thread_snapshot = Arc::clone(&snapshot);
@@ -200,7 +201,7 @@ impl Mpris {
                 }
             })
             .is_ok();
-        spawned.then_some(Mpris { snapshot, commands })
+        spawned.then_some(Self { snapshot, commands })
     }
 
     /// Refreshes what the interface reports. Called once per UI tick.
@@ -218,6 +219,7 @@ impl Mpris {
     }
 
     /// Drains requests made since the last tick.
+    #[must_use]
     pub fn poll(&self) -> Vec<Command> {
         let mut commands = Vec::new();
         while let Ok(command) = self.commands.try_recv() {
@@ -306,15 +308,15 @@ impl MprisRoot {
 #[zbus::interface(name = "org.mpris.MediaPlayer2")]
 impl MprisRoot {
     #[zbus(property)]
-    fn can_quit(&self) -> bool {
+    const fn can_quit(&self) -> bool {
         true
     }
     #[zbus(property)]
-    fn can_raise(&self) -> bool {
+    const fn can_raise(&self) -> bool {
         true
     }
     #[zbus(property)]
-    fn has_track_list(&self) -> bool {
+    const fn has_track_list(&self) -> bool {
         false
     }
     #[zbus(property)]
@@ -333,7 +335,7 @@ impl MprisRoot {
     fn supported_mime_types(&self) -> Vec<String> {
         vec!["audio/mp4".into(), "audio/m4a".into()]
     }
-    fn raise(&self) {}
+    const fn raise(&self) {}
     fn quit(&self) {
         self.send(Command::Quit);
     }
@@ -357,7 +359,7 @@ impl MprisPlayer {
         let id = if post.id.is_empty() {
             "0".to_string()
         } else {
-            post.id.clone()
+            post.id
         };
         ObjectPath::try_from(format!("{TRACK_PATH_PREFIX}{id}")).ok()
     }
@@ -371,31 +373,31 @@ impl MprisPlayer {
     }
 
     #[zbus(property)]
-    fn rate(&self) -> f64 {
+    const fn rate(&self) -> f64 {
         1.0
     }
     #[zbus(property)]
-    fn minimum_rate(&self) -> f64 {
+    const fn minimum_rate(&self) -> f64 {
         1.0
     }
     #[zbus(property)]
-    fn maximum_rate(&self) -> f64 {
+    const fn maximum_rate(&self) -> f64 {
         1.0
     }
     #[zbus(property)]
-    fn can_go_next(&self) -> bool {
+    const fn can_go_next(&self) -> bool {
         true
     }
     #[zbus(property)]
-    fn can_go_previous(&self) -> bool {
+    const fn can_go_previous(&self) -> bool {
         true
     }
     #[zbus(property)]
-    fn can_play(&self) -> bool {
+    const fn can_play(&self) -> bool {
         true
     }
     #[zbus(property)]
-    fn can_pause(&self) -> bool {
+    const fn can_pause(&self) -> bool {
         true
     }
     #[zbus(property)]
@@ -403,7 +405,7 @@ impl MprisPlayer {
         self.snapshot.can_seek()
     }
     #[zbus(property)]
-    fn can_control(&self) -> bool {
+    const fn can_control(&self) -> bool {
         true
     }
 
@@ -415,7 +417,7 @@ impl MprisPlayer {
 
     #[zbus(property)]
     fn volume(&self) -> f64 {
-        self.snapshot.volume() as f64
+        f64::from(self.snapshot.volume())
     }
 
     #[zbus(property)]

@@ -17,6 +17,7 @@ pub struct Window {
 
 /// The rows visible given a viewport height and a top row, clamped so the last
 /// screenful ends at the last row rather than scrolling past it.
+#[must_use]
 pub fn window(total: usize, visible: usize, offset: usize) -> Window {
     if total == 0 || visible == 0 {
         return Window { start: 0, count: 0 };
@@ -44,11 +45,12 @@ pub enum Thumb {
 /// The thumb grows with the visible fraction and shrinks to a single cell when
 /// almost everything is off screen. `offset` is clamped to the scrollable range
 /// first, which is what makes the thumb sit flush against both ends.
+#[must_use]
 pub fn thumb(total: usize, visible: usize, offset: usize, track: u16) -> Thumb {
     if track == 0 || total == 0 || visible == 0 || total <= visible {
         return Thumb::Hidden;
     }
-    let track = track as u64;
+    let track = u64::from(track);
     let len = (track * visible as u64 / total as u64).clamp(1, track);
     let max_start = track - len;
     let scrollable = (total - visible) as u64;
@@ -80,6 +82,7 @@ pub fn ensure_visible(offset: &mut usize, selected: usize, visible: usize, total
 }
 
 /// Moves `selected` by `delta` rows within `total`, clamping to the ends.
+#[must_use]
 pub fn step(selected: usize, delta: isize, total: usize) -> usize {
     if total == 0 {
         return 0;

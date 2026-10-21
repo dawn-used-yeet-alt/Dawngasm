@@ -51,11 +51,11 @@ pub(crate) enum View {
 }
 
 impl View {
-    pub(crate) fn label(self) -> &'static str {
+    pub(crate) const fn label(self) -> &'static str {
         match self {
-            View::Feed => "Feed",
-            View::Saved => "Saved",
-            View::History => "History",
+            Self::Feed => "Feed",
+            Self::Saved => "Saved",
+            Self::History => "History",
         }
     }
 }
@@ -70,8 +70,8 @@ pub(crate) enum InputMode {
 
 impl InputMode {
     /// Both tag prompts use the same `/tags` autocomplete machinery.
-    fn is_tag_mode(self) -> bool {
-        matches!(self, InputMode::Tags | InputMode::BlockedTags)
+    const fn is_tag_mode(self) -> bool {
+        matches!(self, Self::Tags | Self::BlockedTags)
     }
 }
 
@@ -136,7 +136,7 @@ pub struct App {
     sort: usize,
     period: usize,
     query: String,
-    /// Comma-separated tag filter, ANDed with the text search by the API.
+    /// Comma-separated tag filter, `ANDed` with the text search by the API.
     pub(crate) tags: String,
     /// Comma-separated tags whose posts are hidden by the API.
     pub(crate) blocked_tags: String,
@@ -203,7 +203,7 @@ impl App {
         let feed = storage.load_feed_session();
         let playback = storage.load_playback_session();
 
-        let mut app = App {
+        let mut app = Self {
             engine,
             storage,
             mpris,
@@ -323,11 +323,11 @@ impl App {
         self.rows().get(self.selected).cloned()
     }
 
-    pub(crate) fn sort_label(&self) -> &'static str {
+    pub(crate) const fn sort_label(&self) -> &'static str {
         SORTS[self.sort]
     }
 
-    pub(crate) fn period_label(&self) -> &'static str {
+    pub(crate) const fn period_label(&self) -> &'static str {
         PERIODS[self.period]
     }
 
@@ -347,7 +347,7 @@ impl App {
         &self.suggestions
     }
 
-    pub(crate) fn suggestion_selected(&self) -> Option<usize> {
+    pub(crate) const fn suggestion_selected(&self) -> Option<usize> {
         self.suggestion_selected
     }
 
@@ -360,40 +360,37 @@ impl App {
             && !self.suggestions.is_empty()
     }
 
-    pub(crate) fn can_prev_page(&self) -> bool {
+    pub(crate) const fn can_prev_page(&self) -> bool {
         self.page > 0
     }
 
-    pub(crate) fn can_next_page(&self) -> bool {
+    pub(crate) const fn can_next_page(&self) -> bool {
         self.has_more
     }
 
     pub(crate) fn engine_status(&self) -> PlayerStatus {
-        self.engine
-            .as_ref()
-            .map(|engine| engine.status())
-            .unwrap_or(PlayerStatus::Idle)
+        self.engine.as_ref().map_or(
+            PlayerStatus::Idle,
+            super::services::audio::AudioEngine::status,
+        )
     }
 
     pub(crate) fn position_ms(&self) -> i64 {
         self.engine
             .as_ref()
-            .map(|engine| engine.position_ms())
-            .unwrap_or(0)
+            .map_or(0, super::services::audio::AudioEngine::position_ms)
     }
 
     pub(crate) fn duration_ms(&self) -> i64 {
         self.engine
             .as_ref()
-            .map(|engine| engine.duration_ms())
-            .unwrap_or(0)
+            .map_or(0, super::services::audio::AudioEngine::duration_ms)
     }
 
     pub(crate) fn is_seekable(&self) -> bool {
         self.engine
             .as_ref()
-            .map(|engine| engine.is_seekable())
-            .unwrap_or(false)
+            .is_some_and(super::services::audio::AudioEngine::is_seekable)
     }
 
     /// The post currently selected for playback, if any.
@@ -422,7 +419,7 @@ impl App {
 
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
-        use KeyCode::*;
+        use KeyCode::{Char, Down, End, Enter, Esc, Home, Left, PageDown, PageUp, Right, Tab, Up};
         match key.code {
             Char('c') if ctrl => self.should_quit = true,
             Char('q') => self.should_quit = true,
@@ -461,8 +458,8 @@ impl App {
             Char(',') => self.nudge(-NUDGE_SMALL_MS),
             Char('.') => self.nudge(NUDGE_SMALL_MS),
 
-            Char('-') | Char('_') => self.change_volume(-0.05),
-            Char('+') | Char('=') => self.change_volume(0.05),
+            Char('-' | '_') => self.change_volume(-0.05),
+            Char('+' | '=') => self.change_volume(0.05),
             Char('0') => self.set_volume(1.0),
             Char('m') => self.toggle_mute(),
 
@@ -481,7 +478,7 @@ impl App {
     }
 
     fn on_input_key(&mut self, key: KeyEvent) {
-        use KeyCode::*;
+        use KeyCode::{Backspace, Char, Down, Enter, Esc, Tab, Up};
         match key.code {
             Esc => {
                 // The first Esc dismisses the dropdown; a second closes the
@@ -927,19 +924,16 @@ impl App {
     }
 
     fn toggle_mute(&mut self) {
-        match self.muted_volume {
-            Some(previous) => {
-                self.apply_volume(previous);
-                let percent = (previous * 100.0).round() as i32;
-                self.set_toast(format!("Volume {percent}%"), false);
-            }
-            None => {
-                let previous = self.volume;
-                self.apply_volume(0.0);
-                // `apply_volume` clears this, so set it afterwards.
-                self.muted_volume = Some(previous);
-                self.set_toast("Muted.", false);
-            }
+        if let Some(previous) = self.muted_volume {
+            self.apply_volume(previous);
+            let percent = (previous * 100.0).round() as i32;
+            self.set_toast(format!("Volume {percent}%"), false);
+        } else {
+            let previous = self.volume;
+            self.apply_volume(0.0);
+            // `apply_volume` clears this, so set it afterwards.
+            self.muted_volume = Some(previous);
+            self.set_toast("Muted.", false);
         }
     }
 
@@ -1213,14 +1207,14 @@ fn period_index(period: &str) -> usize {
 
 /// The comma-separated fragment currently being typed in the tag field.
 fn active_tag_fragment(value: &str) -> &str {
-    let start = value.rfind(',').map(|index| index + 1).unwrap_or(0);
+    let start = value.rfind(',').map_or(0, |index| index + 1);
     value[start..].trim()
 }
 
 /// Replaces the active fragment with `tag`, leaving earlier tags untouched and
 /// leaving the field ready for the next one.
 fn choose_tag(value: &mut String, tag: &str) {
-    let start = value.rfind(',').map(|index| index + 1).unwrap_or(0);
+    let start = value.rfind(',').map_or(0, |index| index + 1);
     let before = value[..start].to_string();
     let separator = if !before.is_empty() && !before.ends_with(", ") {
         " "

@@ -10,7 +10,7 @@
 //! The concatenated plaintext *is* the original fragmented MP4, `ftyp` + `moov`
 //! and all: symphonia's isomp4 reader reads the header from segment 0 and walks
 //! `moof` fragments from there, so seeks are handled by the demuxer rather than
-//! by splicing the byte stream as the GStreamer build had to.
+//! by splicing the byte stream as the `GStreamer` build had to.
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{self, Read, Seek, SeekFrom};
@@ -133,7 +133,7 @@ impl HotaudioMediaSource {
                 "container has an empty header".into(),
             )));
         }
-        let header = block_on(session.range(0, (header_length - 1) as u64)).map_err(to_io)?;
+        let header = block_on(session.range(0, u64::from(header_length - 1))).map_err(to_io)?;
         let hax = Hax0::parse(&header).map_err(to_io)?;
         if hax.segment_count == 0 {
             return Err(to_io(HotaudioError::Protocol(
@@ -160,7 +160,7 @@ impl HotaudioMediaSource {
             cursor += stored - TAG_LEN;
         }
 
-        Ok(HotaudioMediaSource {
+        Ok(Self {
             api,
             handshake,
             session,
@@ -178,6 +178,7 @@ impl HotaudioMediaSource {
     }
 
     /// The container's declared duration in milliseconds.
+    #[must_use]
     pub fn duration_ms(&self) -> i64 {
         self.hax.duration_ms.min(i64::MAX as u64) as i64
     }

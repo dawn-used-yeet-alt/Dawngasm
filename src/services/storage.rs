@@ -132,7 +132,7 @@ impl Storage {
 
     pub fn in_dir(dir: &Path) -> io::Result<Self> {
         fs::create_dir_all(dir)?;
-        let storage = Storage {
+        let storage = Self {
             dir: dir.to_path_buf(),
             saved_path: dir.join("saved.json"),
             history_path: dir.join("history.json"),
@@ -147,6 +147,7 @@ impl Storage {
         Ok(storage)
     }
 
+    #[must_use]
     pub fn dir(&self) -> &Path {
         &self.dir
     }
@@ -154,35 +155,36 @@ impl Storage {
     /// Where [`export_library`](Self::export_library) writes and
     /// [`import_library_file`](Self::import_library_file) reads: a fixed path
     /// under the data directory, since a TUI has no file chooser.
+    #[must_use]
     pub fn library_path(&self) -> PathBuf {
         self.dir.join("library.json")
     }
 
     // --- saved posts -------------------------------------------------------
 
+    #[must_use]
     pub fn saved(&self) -> &[Post] {
         &self.saved
     }
 
+    #[must_use]
     pub fn history(&self) -> &[Post] {
         &self.history
     }
 
+    #[must_use]
     pub fn is_saved(&self, post: &Post) -> bool {
         self.saved.iter().any(|p| p.key() == post.key())
     }
 
     /// Adds when absent, removes when present. Returns the new state.
     pub fn toggle_saved(&mut self, post: &Post) -> bool {
-        let now_saved = match self.saved.iter().position(|p| p.key() == post.key()) {
-            Some(index) => {
-                self.saved.remove(index);
-                false
-            }
-            None => {
-                self.saved.insert(0, post.clone());
-                true
-            }
+        let now_saved = if let Some(index) = self.saved.iter().position(|p| p.key() == post.key()) {
+            self.saved.remove(index);
+            false
+        } else {
+            self.saved.insert(0, post.clone());
+            true
         };
         self.write_posts(&self.saved_path, &self.saved);
         now_saved
@@ -246,6 +248,7 @@ impl Storage {
         self.write_json(&self.feed_path, &session);
     }
 
+    #[must_use]
     pub fn load_feed_session(&self) -> FeedSession {
         let mut session = FeedSession::default();
         // `after_tokens` from older builds is simply ignored: the API is
@@ -302,6 +305,7 @@ impl Storage {
         self.write_json(&self.playback_path, &session);
     }
 
+    #[must_use]
     pub fn load_playback_session(&self) -> Option<PlaybackSession> {
         let stored: PlaybackSessionFile = self.read_json(&self.playback_path)?;
         if stored.post.key().is_empty() {
@@ -331,13 +335,13 @@ impl Storage {
     // --- library export / import ------------------------------------------
 
     /// `audiogasm-library-v1`, shared with the web app's Saved tab.
+    #[must_use]
     pub fn export_library(&self) -> String {
         let library = Library {
             format: LIBRARY_FORMAT.into(),
             exported_at: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0),
+                .map_or(0, |d| d.as_secs() as i64),
             saved: self.saved.clone(),
             history: self.history.clone(),
         };
@@ -470,7 +474,12 @@ fn parse_library_post(value: &serde_json::Value) -> Option<Post> {
             .unwrap_or_default()
             .to_string()
     };
-    let int_field = |key: &str| -> i64 { object.get(key).and_then(|v| v.as_i64()).unwrap_or(0) };
+    let int_field = |key: &str| -> i64 {
+        object
+            .get(key)
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(0)
+    };
 
     let name = string_field("name");
     let title = string_field("title");
@@ -483,7 +492,7 @@ fn parse_library_post(value: &serde_json::Value) -> Option<Post> {
         Some(value) => value.as_i64().unwrap_or(0),
         None => object
             .get("numComments")
-            .and_then(|v| v.as_i64())
+            .and_then(serde_json::Value::as_i64)
             .unwrap_or(0),
     };
     Some(Post {

@@ -79,12 +79,14 @@ pub struct DawngasmClient {
 }
 
 impl DawngasmClient {
+    #[must_use]
     pub fn from_env() -> Self {
         Self::new(
             std::env::var("DAWNGASM_API_URL").unwrap_or_else(|_| DEFAULT_API_BASE.to_string()),
         )
     }
 
+    #[must_use]
     pub fn new(base: String) -> Self {
         let base = base.trim_end_matches('/').to_string();
         let agent = ureq::Agent::config_builder()
@@ -95,7 +97,7 @@ impl DawngasmClient {
             .http_status_as_error(false)
             .build()
             .new_agent();
-        DawngasmClient {
+        Self {
             agent,
             base,
             tag_cache: HashMap::new(),
@@ -108,7 +110,7 @@ impl DawngasmClient {
     /// is this client's window name (`day`, `week`, `month`, `year`, `all`),
     /// `tags` is the comma-separated tag filter (`f4m,ramblefap`), and
     /// `exclude_tags` is the comma-separated blocklist. Tags and search text
-    /// are ANDed by the API, and either may be empty. Posts whose title or body
+    /// are `ANDed` by the API, and either may be empty. Posts whose title or body
     /// carries no supported audio link are dropped, exactly as the old Reddit
     /// listing parser did.
     pub fn fetch_posts(
@@ -453,18 +455,19 @@ fn int_cell(row: &[Value], index: Option<usize>) -> i64 {
 /// offers, requests, discussion and mod announcements — and showing them next
 /// to real audios just gets in the way, so the feed keeps only posts with a
 /// recognisable audio link.
+#[must_use]
 pub fn is_audio_post(post: &Post) -> bool {
     find_audio_url(post).is_some()
 }
 
-/// The percent-encoding GLib's `Uri.escape_string(url, "", false)` applied:
+/// The percent-encoding `GLib`'s `Uri.escape_string(url, "", false)` applied:
 /// everything except unreserved characters.
 fn percent_encode(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     for byte in input.bytes() {
         match byte {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(byte as char)
+                out.push(byte as char);
             }
             other => out.push_str(&format!("%{other:02X}")),
         }

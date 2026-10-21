@@ -22,19 +22,21 @@ pub enum AudioHost {
 
 impl AudioHost {
     /// The text shown in a post's host badge.
-    pub fn label(self) -> &'static str {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
         match self {
-            AudioHost::Soundgasm => "soundgasm",
-            AudioHost::Whyp => "whyp.it",
-            AudioHost::Audiochan => "audiochan",
-            AudioHost::Hotaudio => "hotaudio",
-            AudioHost::Unknown => "",
+            Self::Soundgasm => "soundgasm",
+            Self::Whyp => "whyp.it",
+            Self::Audiochan => "audiochan",
+            Self::Hotaudio => "hotaudio",
+            Self::Unknown => "",
         }
     }
 }
 
 /// Reddit escapes slashes in some payloads and escapes HTML entities in the
 /// rendered body; undo both before looking for links.
+#[must_use]
 pub fn normalize_text(text: &str) -> String {
     text.replace("\\u002F", "/")
         .replace("\\u002f", "/")
@@ -52,6 +54,7 @@ pub fn normalize_text(text: &str) -> String {
 }
 
 /// Trailing punctuation picked up when a link is copied out of prose.
+#[must_use]
 pub fn clean_url(url: &str) -> String {
     let mut cleaned = url.trim();
     loop {
@@ -93,6 +96,7 @@ fn patterns() -> &'static Patterns {
 }
 
 /// The first audio link in the post, in host order, or `None`.
+#[must_use]
 pub fn find_audio_url(post: &Post) -> Option<String> {
     let patterns = patterns();
     let targets = [normalize_text(&post.url), normalize_text(&post.selftext)];
@@ -115,6 +119,7 @@ pub fn find_audio_url(post: &Post) -> Option<String> {
     None
 }
 
+#[must_use]
 pub fn detect_host(post: &Post) -> AudioHost {
     let Some(url) = find_audio_url(post) else {
         return AudioHost::Unknown;
@@ -123,6 +128,7 @@ pub fn detect_host(post: &Post) -> AudioHost {
 }
 
 /// The host a resolved URL belongs to.
+#[must_use]
 pub fn host_of_url(url: &str) -> AudioHost {
     let lower = url.to_lowercase();
     if lower.contains("soundgasm.net/u/") {

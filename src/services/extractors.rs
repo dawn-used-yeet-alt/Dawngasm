@@ -74,12 +74,13 @@ pub struct Extractors {
 }
 
 impl Extractors {
+    #[must_use]
     pub fn new() -> Self {
         let agent = ureq::Agent::config_builder()
             .user_agent(BROWSER_UA)
             .build()
             .new_agent();
-        Extractors { agent }
+        Self { agent }
     }
 
     /// Resolves `post` to a playable byte source, choosing the extractor by
@@ -230,6 +231,7 @@ impl Default for Extractors {
 
 // --- pure parsers ----------------------------------------------------------
 
+#[must_use]
 pub fn find_soundgasm_url(post: &Post) -> Option<String> {
     audio_host::find_audio_url(post).filter(|url| url.to_lowercase().contains("soundgasm.net/u/"))
 }
@@ -275,9 +277,12 @@ pub fn extract_audiochan_slug(text: &str) -> Option<String> {
 }
 
 /// Reads a top-level string field out of an audiochan JSON response.
+#[must_use]
 pub fn parse_audiochan_field(json_data: &str, field: &str) -> Option<String> {
     let root: Value = serde_json::from_str(json_data).ok()?;
-    root.get(field)?.as_str().map(|s| s.to_string())
+    root.get(field)?
+        .as_str()
+        .map(std::string::ToString::to_string)
 }
 
 #[cfg(test)]

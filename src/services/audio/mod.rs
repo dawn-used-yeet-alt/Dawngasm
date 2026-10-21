@@ -105,8 +105,8 @@ struct Buffer {
 }
 
 impl Shared {
-    fn new() -> Self {
-        Shared {
+    const fn new() -> Self {
+        Self {
             buffer: Mutex::new(Buffer {
                 samples: VecDeque::new(),
                 finished: false,
@@ -135,8 +135,8 @@ impl Shared {
 
     /// Playhead in milliseconds: where the last seek landed plus the audio since.
     fn position_ms(&self) -> i64 {
-        let channels = self.channels.load(Ordering::Relaxed).max(1) as u64;
-        let rate = self.sample_rate.load(Ordering::Relaxed).max(1) as u64;
+        let channels = u64::from(self.channels.load(Ordering::Relaxed).max(1));
+        let rate = u64::from(self.sample_rate.load(Ordering::Relaxed).max(1));
         let frames = self.yielded.load(Ordering::Relaxed) / channels;
         self.base_ms.load(Ordering::Relaxed) + (frames as i64 * 1000) / rate as i64
     }
@@ -235,7 +235,7 @@ impl AudioEngine {
             .spawn(move || worker_loop(receiver))
             .map_err(|e| format!("could not start the audio worker: {e}"))?;
 
-        Ok(AudioEngine {
+        Ok(Self {
             _sink: sink,
             player,
             worker,
@@ -247,11 +247,11 @@ impl AudioEngine {
     }
 
     /// Arranges for the next track to begin paused, for session restore.
-    pub fn set_start_paused(&mut self, paused: bool) {
+    pub const fn set_start_paused(&mut self, paused: bool) {
         self.start_paused = paused;
     }
 
-    pub fn volume(&self) -> f32 {
+    pub const fn volume(&self) -> f32 {
         self.volume
     }
 
@@ -280,8 +280,7 @@ impl AudioEngine {
             .lock()
             .unwrap()
             .as_ref()
-            .map(|shared| shared.position_ms())
-            .unwrap_or(0)
+            .map_or(0, |shared| shared.position_ms())
     }
 
     pub fn duration_ms(&self) -> i64 {
@@ -289,8 +288,7 @@ impl AudioEngine {
             .lock()
             .unwrap()
             .as_ref()
-            .map(|shared| shared.duration_ms.load(Ordering::Relaxed))
-            .unwrap_or(0)
+            .map_or(0, |shared| shared.duration_ms.load(Ordering::Relaxed))
     }
 
     pub fn is_seekable(&self) -> bool {
@@ -492,7 +490,7 @@ fn decode(shared: &Shared, media: Box<dyn MediaSource>) -> Result<(), String> {
         (
             track.id,
             sample_rate,
-            channels as u32,
+            u32::from(channels),
             track_duration_ms(track),
             decoder,
         )
@@ -626,10 +624,11 @@ fn track_duration_ms(track: &Track) -> Option<i64> {
     }
     let rate = track.codec_params.as_ref()?.audio()?.sample_rate?;
     let frames = track.num_frames?;
-    Some((frames as i128 * 1000 / rate.max(1) as i128) as i64)
+    Some((i128::from(frames) * 1000 / i128::from(rate.max(1))) as i64)
 }
 
 /// Formats a millisecond timestamp as `m:ss` or `h:mm:ss`.
+#[must_use]
 pub fn format_time(ms: i64) -> String {
     let total = (ms.max(0) as u64) / 1000;
     let seconds = total % 60;
