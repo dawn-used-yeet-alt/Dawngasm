@@ -89,7 +89,7 @@ struct Snapshot {
 }
 
 impl Snapshot {
-    fn new() -> Self {
+    const fn new() -> Self {
         Self {
             status: AtomicU8::new(PlaybackStatus::Stopped.to_u8()),
             position_ms: AtomicI64::new(0),

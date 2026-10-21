@@ -353,7 +353,7 @@ impl App {
 
     /// Whether the autocomplete dropdown should be drawn. A prompt with no
     /// matches shows nothing rather than an empty box.
-    pub(crate) fn suggestions_visible(&self) -> bool {
+    pub(crate) const fn suggestions_visible(&self) -> bool {
         self.input.is_some()
             && self.input_mode.is_tag_mode()
             && !self.suggestions_hidden
