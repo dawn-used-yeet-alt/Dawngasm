@@ -58,6 +58,13 @@ async-io = "2"
 
 [dev-dependencies]
 
+# Lint policy: deny the default, pedantic and nursery lint groups. Targeted
+# `#[allow(...)]` attributes at the call site document any exception.
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

@@ -51,11 +51,11 @@ pub(crate) enum View {
 }
 
 impl View {
-    pub(crate) fn label(self) -> &'static str {
+    pub(crate) const fn label(self) -> &'static str {
         match self {
-            View::Feed => "Feed",
-            View::Saved => "Saved",
-            View::History => "History",
+            Self::Feed => "Feed",
+            Self::Saved => "Saved",
+            Self::History => "History",
         }
     }
 }
@@ -70,8 +70,8 @@ pub(crate) enum InputMode {
 
 impl InputMode {
     /// Both tag prompts use the same `/tags` autocomplete machinery.
-    fn is_tag_mode(self) -> bool {
-        matches!(self, InputMode::Tags | InputMode::BlockedTags)
+    const fn is_tag_mode(self) -> bool {
+        matches!(self, Self::Tags | Self::BlockedTags)
     }
 }
 
@@ -109,6 +109,7 @@ enum Event {
     },
 }
 
+#[allow(clippy::struct_excessive_bools)] // Independent UI and session flags.
 pub struct App {
     // --- services ---
     /// `None` when no output device could be opened; browsing still works.
@@ -136,7 +137,7 @@ pub struct App {
     sort: usize,
     period: usize,
     query: String,
-    /// Comma-separated tag filter, ANDed with the text search by the API.
+    /// Comma-separated tag filter, `ANDed` with the text search by the API.
     pub(crate) tags: String,
     /// Comma-separated tags whose posts are hidden by the API.
     pub(crate) blocked_tags: String,
@@ -184,6 +185,11 @@ pub struct App {
 impl App {
     /// Opens storage and the audio device, starts the feed worker, and restores
     /// the previous session. The terminal is set up by the caller.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if storage cannot be opened or the feed worker cannot be
+    /// spawned.
     pub fn new() -> Result<Self> {
         let storage = Storage::new()?;
 
@@ -196,14 +202,14 @@ impl App {
         let (event_tx, event_rx) = mpsc::channel();
         let worker = thread::Builder::new()
             .name("audiogasm-feed".into())
-            .spawn(move || feed_worker(command_rx, event_tx))?;
+            .spawn(move || feed_worker(&command_rx, &event_tx))?;
 
         let mpris = Mpris::start();
 
         let feed = storage.load_feed_session();
         let playback = storage.load_playback_session();
 
-        let mut app = App {
+        let mut app = Self {
             engine,
             storage,
             mpris,
@@ -243,7 +249,7 @@ impl App {
             toast_error: false,
             toast_at: None,
             show_help: false,
-            pending_scroll: Some(feed.scroll_top.round().max(0.0) as usize),
+            pending_scroll: Some(saved_scroll_offset(feed.scroll_top)),
             last_scroll_save: Instant::now(),
             should_quit: false,
         };
@@ -266,6 +272,10 @@ impl App {
     }
 
     /// Runs until the user quits, then saves the sessions.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if drawing or reading terminal events fails.
     pub fn run(&mut self, terminal: &mut DefaultTerminal) -> std::io::Result<()> {
         use ratatui::crossterm::event::{self, Event as TermEvent, KeyEventKind};
 
@@ -323,11 +333,11 @@ impl App {
         self.rows().get(self.selected).cloned()
     }
 
-    pub(crate) fn sort_label(&self) -> &'static str {
+    pub(crate) const fn sort_label(&self) -> &'static str {
         SORTS[self.sort]
     }
 
-    pub(crate) fn period_label(&self) -> &'static str {
+    pub(crate) const fn period_label(&self) -> &'static str {
         PERIODS[self.period]
     }
 
@@ -347,53 +357,50 @@ impl App {
         &self.suggestions
     }
 
-    pub(crate) fn suggestion_selected(&self) -> Option<usize> {
+    pub(crate) const fn suggestion_selected(&self) -> Option<usize> {
         self.suggestion_selected
     }
 
     /// Whether the autocomplete dropdown should be drawn. A prompt with no
     /// matches shows nothing rather than an empty box.
-    pub(crate) fn suggestions_visible(&self) -> bool {
+    pub(crate) const fn suggestions_visible(&self) -> bool {
         self.input.is_some()
             && self.input_mode.is_tag_mode()
             && !self.suggestions_hidden
             && !self.suggestions.is_empty()
     }
 
-    pub(crate) fn can_prev_page(&self) -> bool {
+    pub(crate) const fn can_prev_page(&self) -> bool {
         self.page > 0
     }
 
-    pub(crate) fn can_next_page(&self) -> bool {
+    pub(crate) const fn can_next_page(&self) -> bool {
         self.has_more
     }
 
     pub(crate) fn engine_status(&self) -> PlayerStatus {
-        self.engine
-            .as_ref()
-            .map(|engine| engine.status())
-            .unwrap_or(PlayerStatus::Idle)
+        self.engine.as_ref().map_or(
+            PlayerStatus::Idle,
+            super::services::audio::AudioEngine::status,
+        )
     }
 
     pub(crate) fn position_ms(&self) -> i64 {
         self.engine
             .as_ref()
-            .map(|engine| engine.position_ms())
-            .unwrap_or(0)
+            .map_or(0, super::services::audio::AudioEngine::position_ms)
     }
 
     pub(crate) fn duration_ms(&self) -> i64 {
         self.engine
             .as_ref()
-            .map(|engine| engine.duration_ms())
-            .unwrap_or(0)
+            .map_or(0, super::services::audio::AudioEngine::duration_ms)
     }
 
     pub(crate) fn is_seekable(&self) -> bool {
         self.engine
             .as_ref()
-            .map(|engine| engine.is_seekable())
-            .unwrap_or(false)
+            .is_some_and(super::services::audio::AudioEngine::is_seekable)
     }
 
     /// The post currently selected for playback, if any.
@@ -415,6 +422,8 @@ impl App {
     // --- input -------------------------------------------------------------
 
     fn on_key(&mut self, key: KeyEvent) {
+        use KeyCode::{Char, Down, End, Enter, Esc, Home, Left, PageDown, PageUp, Right, Tab, Up};
+
         if self.input.is_some() {
             self.on_input_key(key);
             return;
@@ -422,7 +431,6 @@ impl App {
 
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
-        use KeyCode::*;
         match key.code {
             Char('c') if ctrl => self.should_quit = true,
             Char('q') => self.should_quit = true,
@@ -461,8 +469,8 @@ impl App {
             Char(',') => self.nudge(-NUDGE_SMALL_MS),
             Char('.') => self.nudge(NUDGE_SMALL_MS),
 
-            Char('-') | Char('_') => self.change_volume(-0.05),
-            Char('+') | Char('=') => self.change_volume(0.05),
+            Char('-' | '_') => self.change_volume(-0.05),
+            Char('+' | '=') => self.change_volume(0.05),
             Char('0') => self.set_volume(1.0),
             Char('m') => self.toggle_mute(),
 
@@ -481,7 +489,7 @@ impl App {
     }
 
     fn on_input_key(&mut self, key: KeyEvent) {
-        use KeyCode::*;
+        use KeyCode::{Backspace, Char, Down, Enter, Esc, Tab, Up};
         match key.code {
             Esc => {
                 // The first Esc dismisses the dropdown; a second closes the
@@ -596,15 +604,15 @@ impl App {
         }
     }
 
-    fn move_suggestion(&mut self, delta: isize) {
+    const fn move_suggestion(&mut self, delta: isize) {
         if !self.suggestions_visible() {
             return;
         }
-        let len = self.suggestions.len() as isize;
+        let len = self.suggestions.len();
         self.suggestion_selected = Some(match self.suggestion_selected {
-            Some(index) => (index as isize + delta).rem_euclid(len) as usize,
+            Some(index) => index.wrapping_add_signed(delta) % len,
             None if delta > 0 => 0,
-            None => (len - 1) as usize,
+            None => len - 1,
         });
     }
 
@@ -636,7 +644,7 @@ impl App {
 
     /// How far a page key moves, at least one row.
     fn page_step(&self) -> isize {
-        self.viewport_rows.max(1) as isize
+        isize::try_from(self.viewport_rows.max(1)).unwrap_or(isize::MAX)
     }
 
     // --- list navigation ---------------------------------------------------
@@ -733,7 +741,7 @@ impl App {
         }
     }
 
-    fn on_feed_failed(&mut self, message: String, generation: u64) {
+    fn on_feed_failed(&mut self, message: &str, generation: u64) {
         if generation != self.load_generation {
             return;
         }
@@ -855,17 +863,13 @@ impl App {
                 .iter()
                 .position(|post| post.key() == self.playing_key)
             {
-                Some(current) => current as isize + delta,
+                Some(current) => current.wrapping_add_signed(delta),
                 // No current track is not the end of the list: next starts at
                 // the top and previous at the bottom.
                 None if delta > 0 => 0,
-                None => len as isize - 1,
+                None => len - 1,
             };
-            if index < 0 || index as usize >= len {
-                None
-            } else {
-                self.playlist.get(index as usize).cloned()
-            }
+            self.playlist.get(index).cloned()
         };
         match found {
             Some(post) => {
@@ -922,32 +926,29 @@ impl App {
 
     fn set_volume(&mut self, volume: f32) {
         self.apply_volume(volume);
-        let percent = (self.volume * 100.0).round() as i32;
-        self.set_toast(format!("Volume {percent}%"), false);
+        let percent = (self.volume * 100.0).round();
+        self.set_toast(format!("Volume {percent:.0}%"), false);
     }
 
     fn toggle_mute(&mut self) {
-        match self.muted_volume {
-            Some(previous) => {
-                self.apply_volume(previous);
-                let percent = (previous * 100.0).round() as i32;
-                self.set_toast(format!("Volume {percent}%"), false);
-            }
-            None => {
-                let previous = self.volume;
-                self.apply_volume(0.0);
-                // `apply_volume` clears this, so set it afterwards.
-                self.muted_volume = Some(previous);
-                self.set_toast("Muted.", false);
-            }
+        if let Some(previous) = self.muted_volume {
+            self.apply_volume(previous);
+            let percent = (previous * 100.0).round();
+            self.set_toast(format!("Volume {percent:.0}%"), false);
+        } else {
+            let previous = self.volume;
+            self.apply_volume(0.0);
+            // `apply_volume` clears this, so set it afterwards.
+            self.muted_volume = Some(previous);
+            self.set_toast("Muted.", false);
         }
     }
 
     fn poll_audio(&mut self) {
-        let mut events = Vec::new();
-        if let Some(engine) = self.engine.as_mut() {
-            events = engine.poll();
-        }
+        let events = self
+            .engine
+            .as_mut()
+            .map_or_else(Vec::new, super::services::audio::AudioEngine::poll);
         let mut started = false;
         for event in events {
             match event {
@@ -1024,7 +1025,7 @@ impl App {
             &self.query,
             self.page,
             self.has_more,
-            self.scroll as f64,
+            f64::from(u32::try_from(self.scroll).unwrap_or(u32::MAX)),
         );
     }
 
@@ -1134,7 +1135,7 @@ impl App {
                 Event::FeedFailed {
                     message,
                     generation,
-                } => self.on_feed_failed(message, generation),
+                } => self.on_feed_failed(&message, generation),
                 Event::TagsSuggested { tags, generation } => {
                     // Ignore a response for a prefix the buffer has moved past,
                     // or one that arrived after the dropdown was dismissed.
@@ -1158,8 +1159,16 @@ impl App {
     }
 }
 
+/// Converts a persisted scroll offset, saturating malformed values.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn saved_scroll_offset(value: f64) -> usize {
+    // Session data is non-negative screen rows; saturating casts keep a
+    // corrupt file from wrapping the offset.
+    value.round().max(0.0) as usize
+}
+
 /// Fetches pages for the feed, one request at a time.
-fn feed_worker(commands: Receiver<Command>, events: Sender<Event>) {
+fn feed_worker(commands: &Receiver<Command>, events: &Sender<Event>) {
     let mut client = DawngasmClient::from_env();
     while let Ok(command) = commands.recv() {
         let event = match command {
@@ -1213,14 +1222,14 @@ fn period_index(period: &str) -> usize {
 
 /// The comma-separated fragment currently being typed in the tag field.
 fn active_tag_fragment(value: &str) -> &str {
-    let start = value.rfind(',').map(|index| index + 1).unwrap_or(0);
+    let start = value.rfind(',').map_or(0, |index| index + 1);
     value[start..].trim()
 }
 
 /// Replaces the active fragment with `tag`, leaving earlier tags untouched and
 /// leaving the field ready for the next one.
 fn choose_tag(value: &mut String, tag: &str) {
-    let start = value.rfind(',').map(|index| index + 1).unwrap_or(0);
+    let start = value.rfind(',').map_or(0, |index| index + 1);
     let before = value[..start].to_string();
     let separator = if !before.is_empty() && !before.ends_with(", ") {
         " "

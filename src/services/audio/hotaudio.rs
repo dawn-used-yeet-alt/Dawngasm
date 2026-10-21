@@ -10,7 +10,7 @@
 //! The concatenated plaintext *is* the original fragmented MP4, `ftyp` + `moov`
 //! and all: symphonia's isomp4 reader reads the header from segment 0 and walks
 //! `moof` fragments from there, so seeks are handled by the demuxer rather than
-//! by splicing the byte stream as the GStreamer build had to.
+//! by splicing the byte stream as the `GStreamer` build had to.
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{self, Read, Seek, SeekFrom};
@@ -35,7 +35,7 @@ const PLAIN_CACHE_SEGMENTS: usize = 16;
 const TAG_LEN: u64 = 16;
 
 fn to_io(error: HotaudioError) -> io::Error {
-    io::Error::other(error.to_string())
+    io::Error::other(error)
 }
 
 /// A [`RangeSource`] that owns its client and URL, so a track can hold both
@@ -63,8 +63,11 @@ impl RangeSource for SessionRange {
             206 => Ok(response.body),
             // A mirror that ignores `Range` sends the whole body; slice locally.
             200 => {
-                let from = start as usize;
-                let to = ((end + 1) as usize).min(response.body.len());
+                let from = usize::try_from(start)
+                    .map_err(|_| HotaudioError::Protocol("range start too large".into()))?;
+                let to = usize::try_from(end.saturating_add(1))
+                    .map_err(|_| HotaudioError::Protocol("range end too large".into()))?
+                    .min(response.body.len());
                 if from >= to {
                     return Err(HotaudioError::Protocol("range start beyond body".into()));
                 }
@@ -105,6 +108,11 @@ impl HotaudioMediaSource {
     /// Costs the page handshake, one listen call and a read of the container
     /// header — enough to know the segment layout, which the served byte space
     /// is derived from up front.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the handshake fails or the container header is
+    /// missing or malformed.
     pub fn open(page_url: &str) -> io::Result<Self> {
         let api = Client::api();
         let handshake = block_on(listen::load_handshake(
@@ -133,7 +141,7 @@ impl HotaudioMediaSource {
                 "container has an empty header".into(),
             )));
         }
-        let header = block_on(session.range(0, (header_length - 1) as u64)).map_err(to_io)?;
+        let header = block_on(session.range(0, u64::from(header_length - 1))).map_err(to_io)?;
         let hax = Hax0::parse(&header).map_err(to_io)?;
         if hax.segment_count == 0 {
             return Err(to_io(HotaudioError::Protocol(
@@ -160,7 +168,7 @@ impl HotaudioMediaSource {
             cursor += stored - TAG_LEN;
         }
 
-        Ok(HotaudioMediaSource {
+        Ok(Self {
             api,
             handshake,
             session,
@@ -178,14 +186,15 @@ impl HotaudioMediaSource {
     }
 
     /// The container's declared duration in milliseconds.
+    #[must_use]
     pub fn duration_ms(&self) -> i64 {
-        self.hax.duration_ms.min(i64::MAX as u64) as i64
+        i64::try_from(self.hax.duration_ms).unwrap_or(i64::MAX)
     }
 
     /// The segment containing plaintext `offset`.
     fn segment_for_offset(&self, offset: u64) -> u32 {
         let index = self.plain_offsets.partition_point(|&start| start <= offset);
-        index.saturating_sub(1) as u32
+        u32::try_from(index.saturating_sub(1)).unwrap_or(u32::MAX)
     }
 
     /// Marks `index` as most-recently used, evicting the oldest past capacity.
@@ -214,12 +223,13 @@ impl HotaudioMediaSource {
         // need more than one.
         let key = {
             let mut pager = download::ListenPager::new(&self.api, &self.handshake);
-            let mut pages = 0u32;
+            let mut page_count = 0u32;
             let tree = &self.tree;
             let keys = &mut self.keys;
             let cache = &mut self.cache;
             block_on(async move {
-                download::derive_or_page(&mut pager, tree, keys, cache, index, &mut pages).await
+                download::derive_or_page(&mut pager, tree, keys, cache, index, &mut page_count)
+                    .await
             })
             .map_err(to_io)?
         };
@@ -261,7 +271,8 @@ impl Read for HotaudioMediaSource {
             .plain
             .get(&index)
             .expect("ensure_segment inserted the segment");
-        let offset = (self.pos - segment_start) as usize;
+        let offset = usize::try_from(self.pos - segment_start)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
         let count = (plain.len() - offset).min(buf.len());
         buf[..count].copy_from_slice(&plain[offset..offset + count]);
         self.pos += count as u64;
@@ -272,11 +283,15 @@ impl Read for HotaudioMediaSource {
 impl Seek for HotaudioMediaSource {
     fn seek(&mut self, from: SeekFrom) -> io::Result<u64> {
         let target = match from {
-            SeekFrom::Start(offset) => offset as i64,
-            SeekFrom::Current(delta) => self.pos as i64 + delta,
-            SeekFrom::End(delta) => self.plain_len as i64 + delta,
+            SeekFrom::Start(offset) => i64::try_from(offset).unwrap_or(i64::MAX),
+            SeekFrom::Current(delta) => i64::try_from(self.pos)
+                .unwrap_or(i64::MAX)
+                .saturating_add(delta),
+            SeekFrom::End(delta) => i64::try_from(self.plain_len)
+                .unwrap_or(i64::MAX)
+                .saturating_add(delta),
         };
-        self.pos = target.max(0) as u64;
+        self.pos = u64::try_from(target.max(0)).unwrap_or(0);
         Ok(self.pos)
     }
 }
@@ -358,7 +373,7 @@ mod tests {
 
         // The LRU cap keeps at most the configured number of segments.
         source.plain_len = 700;
-        for index in 0..PLAIN_CACHE_SEGMENTS as u32 + 5 {
+        for index in 0..u32::try_from(PLAIN_CACHE_SEGMENTS).unwrap() + 5 {
             source.plain.insert(index, vec![0u8; 1]);
             source.touch(index);
         }

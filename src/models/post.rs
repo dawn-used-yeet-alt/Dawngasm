@@ -30,6 +30,7 @@ pub struct Post {
 impl Post {
     /// The stable identity used for the "now playing" highlight and for
     /// de-duplicating saved posts and history.
+    #[must_use]
     pub fn key(&self) -> &str {
         &self.name
     }

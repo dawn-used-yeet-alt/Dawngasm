@@ -18,6 +18,7 @@
 //! so there is no async runtime to embed.
 
 use std::collections::HashMap;
+use std::fmt::Write as _;
 
 use serde_json::Value;
 
@@ -79,13 +80,15 @@ pub struct DawngasmClient {
 }
 
 impl DawngasmClient {
+    #[must_use]
     pub fn from_env() -> Self {
-        Self::new(
-            std::env::var("DAWNGASM_API_URL").unwrap_or_else(|_| DEFAULT_API_BASE.to_string()),
-        )
+        let base =
+            std::env::var("DAWNGASM_API_URL").unwrap_or_else(|_| DEFAULT_API_BASE.to_string());
+        Self::new(&base)
     }
 
-    pub fn new(base: String) -> Self {
+    #[must_use]
+    pub fn new(base: &str) -> Self {
         let base = base.trim_end_matches('/').to_string();
         let agent = ureq::Agent::config_builder()
             .user_agent(DEFAULT_USER_AGENT)
@@ -95,7 +98,7 @@ impl DawngasmClient {
             .http_status_as_error(false)
             .build()
             .new_agent();
-        DawngasmClient {
+        Self {
             agent,
             base,
             tag_cache: HashMap::new(),
@@ -108,9 +111,14 @@ impl DawngasmClient {
     /// is this client's window name (`day`, `week`, `month`, `year`, `all`),
     /// `tags` is the comma-separated tag filter (`f4m,ramblefap`), and
     /// `exclude_tags` is the comma-separated blocklist. Tags and search text
-    /// are ANDed by the API, and either may be empty. Posts whose title or body
+    /// are `ANDed` by the API, and either may be empty. Posts whose title or body
     /// carries no supported audio link are dropped, exactly as the old Reddit
     /// listing parser did.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the API request fails or its response cannot be
+    /// decoded.
     pub fn fetch_posts(
         &mut self,
         sort: &str,
@@ -165,6 +173,11 @@ impl DawngasmClient {
     /// Autocomplete recommendations for one tag prefix, ordered by how many
     /// posts carry the tag. A prefix shorter than [`MIN_TAG_PREFIX`] is a
     /// local no-op, matching the endpoint's own rule.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the API request fails or its response cannot be
+    /// decoded.
     pub fn suggest_tags(&mut self, prefix: &str) -> Result<Vec<TagSuggestion>> {
         let prefix = prefix.trim();
         if prefix.chars().count() < MIN_TAG_PREFIX {
@@ -246,12 +259,14 @@ fn api_error(status: u16, body: &str) -> String {
         .and_then(Value::as_str)
         .unwrap_or("unexpected response");
     if status == 429 {
-        match root.get("retryAfterSeconds").and_then(Value::as_u64) {
-            Some(seconds) => {
-                format!("dawngasm API rate limit exceeded ({message}); retry in {seconds}s")
-            }
-            None => format!("dawngasm API rate limit exceeded ({message})"),
-        }
+        root.get("retryAfterSeconds")
+            .and_then(Value::as_u64)
+            .map_or_else(
+                || format!("dawngasm API rate limit exceeded ({message})"),
+                |seconds| {
+                    format!("dawngasm API rate limit exceeded ({message}); retry in {seconds}s")
+                },
+            )
     } else {
         format!("dawngasm API returned HTTP {status}: {message}")
     }
@@ -453,20 +468,21 @@ fn int_cell(row: &[Value], index: Option<usize>) -> i64 {
 /// offers, requests, discussion and mod announcements — and showing them next
 /// to real audios just gets in the way, so the feed keeps only posts with a
 /// recognisable audio link.
+#[must_use]
 pub fn is_audio_post(post: &Post) -> bool {
     find_audio_url(post).is_some()
 }
 
-/// The percent-encoding GLib's `Uri.escape_string(url, "", false)` applied:
+/// The percent-encoding `GLib`'s `Uri.escape_string(url, "", false)` applied:
 /// everything except unreserved characters.
 fn percent_encode(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     for byte in input.bytes() {
         match byte {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(byte as char)
+                out.push(byte as char);
             }
-            other => out.push_str(&format!("%{other:02X}")),
+            other => write!(out, "%{other:02X}").expect("writing to a String cannot fail"),
         }
     }
     out
@@ -498,7 +514,7 @@ mod tests {
         assert_eq!(page.posts[0].id, "abc");
         assert_eq!(page.posts[0].author, "alice");
         assert_eq!(page.posts[0].score, 12);
-        assert_eq!(page.posts[0].created_utc, 1791938952);
+        assert_eq!(page.posts[0].created_utc, 1_791_938_952);
         assert_eq!(page.posts[0].num_comments, 0);
     }
 
@@ -629,9 +645,10 @@ mod tests {
 
     #[test]
     fn an_empty_tag_response_is_an_empty_list() {
-        assert!(parse_tags_response(r#"{"tags":[],"rowCount":0}"#)
-            .unwrap()
-            .is_empty());
+        assert_eq!(
+            parse_tags_response(r#"{"tags":[],"rowCount":0}"#).unwrap(),
+            []
+        );
     }
 
     #[test]

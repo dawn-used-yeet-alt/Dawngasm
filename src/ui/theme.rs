@@ -25,39 +25,48 @@ pub const BAD: Color = Color::Rgb(0xe0, 0x7a, 0x7a);
 /// The selected row's background.
 pub const SELECT_BG: Color = Color::Rgb(0x24, 0x31, 0x3b);
 
+#[must_use]
 pub fn title() -> Style {
     Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
 }
 
+#[must_use]
 pub fn muted() -> Style {
     Style::default().fg(MUTED)
 }
 
+#[must_use]
 pub fn faint() -> Style {
     Style::default().fg(FAINT)
 }
 
+#[must_use]
 pub fn selected() -> Style {
     Style::default().bg(SELECT_BG)
 }
 
+#[must_use]
 pub fn playing() -> Style {
     Style::default().fg(GOOD).add_modifier(Modifier::BOLD)
 }
 
+#[must_use]
 pub fn saved() -> Style {
     Style::default().fg(WARN)
 }
 
+#[must_use]
 pub fn error() -> Style {
     Style::default().fg(BAD)
 }
 
+#[must_use]
 pub fn toast() -> Style {
     Style::default().fg(ACCENT)
 }
 
 /// An active tab is bold and accented; the rest recede.
+#[must_use]
 pub fn tab(active: bool) -> Style {
     if active {
         Style::default()
@@ -70,6 +79,7 @@ pub fn tab(active: bool) -> Style {
 
 /// The badge colour and short label for a host. The label is padded to a fixed
 /// width by the list so the titles line up.
+#[must_use]
 pub fn host(host: AudioHost) -> (Style, &'static str) {
     match host {
         AudioHost::Soundgasm => (Style::default().fg(Color::Rgb(0xd9, 0x8b, 0x5a)), "sndgsm"),

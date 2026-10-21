@@ -112,6 +112,11 @@ pub struct Storage {
 impl Storage {
     /// `$XDG_DATA_HOME/audiogasm`, `$HOME/.local/share/audiogasm` on Unix,
     /// or `%APPDATA%\audiogasm` on Windows.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no data directory is configured or the storage
+    /// directory cannot be created.
     pub fn new() -> io::Result<Self> {
         let base = std::env::var_os("XDG_DATA_HOME")
             .map(PathBuf::from)
@@ -130,9 +135,13 @@ impl Storage {
         Self::in_dir(&base.join("audiogasm"))
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if the storage directory cannot be created or its
+    /// files cannot be read.
     pub fn in_dir(dir: &Path) -> io::Result<Self> {
         fs::create_dir_all(dir)?;
-        let storage = Storage {
+        let storage = Self {
             dir: dir.to_path_buf(),
             saved_path: dir.join("saved.json"),
             history_path: dir.join("history.json"),
@@ -142,11 +151,12 @@ impl Storage {
             history: Vec::new(),
         };
         let mut storage = storage;
-        storage.saved = storage.load_posts(&storage.saved_path.clone());
-        storage.history = storage.load_posts(&storage.history_path.clone());
+        storage.saved = Self::load_posts(&storage.saved_path.clone());
+        storage.history = Self::load_posts(&storage.history_path.clone());
         Ok(storage)
     }
 
+    #[must_use]
     pub fn dir(&self) -> &Path {
         &self.dir
     }
@@ -154,37 +164,38 @@ impl Storage {
     /// Where [`export_library`](Self::export_library) writes and
     /// [`import_library_file`](Self::import_library_file) reads: a fixed path
     /// under the data directory, since a TUI has no file chooser.
+    #[must_use]
     pub fn library_path(&self) -> PathBuf {
         self.dir.join("library.json")
     }
 
     // --- saved posts -------------------------------------------------------
 
+    #[must_use]
     pub fn saved(&self) -> &[Post] {
         &self.saved
     }
 
+    #[must_use]
     pub fn history(&self) -> &[Post] {
         &self.history
     }
 
+    #[must_use]
     pub fn is_saved(&self, post: &Post) -> bool {
         self.saved.iter().any(|p| p.key() == post.key())
     }
 
     /// Adds when absent, removes when present. Returns the new state.
     pub fn toggle_saved(&mut self, post: &Post) -> bool {
-        let now_saved = match self.saved.iter().position(|p| p.key() == post.key()) {
-            Some(index) => {
-                self.saved.remove(index);
-                false
-            }
-            None => {
-                self.saved.insert(0, post.clone());
-                true
-            }
+        let now_saved = if let Some(index) = self.saved.iter().position(|p| p.key() == post.key()) {
+            self.saved.remove(index);
+            false
+        } else {
+            self.saved.insert(0, post.clone());
+            true
         };
-        self.write_posts(&self.saved_path, &self.saved);
+        Self::write_posts(&self.saved_path, &self.saved);
         now_saved
     }
 
@@ -197,12 +208,12 @@ impl Storage {
         }
         self.history.insert(0, post.clone());
         self.history.truncate(MAX_HISTORY);
-        self.write_posts(&self.history_path, &self.history);
+        Self::write_posts(&self.history_path, &self.history);
     }
 
     pub fn clear_history(&mut self) {
         self.history.clear();
-        self.write_posts(&self.history_path, &self.history);
+        Self::write_posts(&self.history_path, &self.history);
     }
 
     // --- feed session ------------------------------------------------------
@@ -235,7 +246,7 @@ impl Storage {
             tags: tags.into(),
             blocked_tags: blocked_tags.into(),
             query: query.into(),
-            current_page: current_page as i64,
+            current_page: i64::try_from(current_page).unwrap_or(i64::MAX),
             has_more,
             scroll_top: if scroll_top.is_nan() || scroll_top < 0.0 {
                 0.0
@@ -243,14 +254,15 @@ impl Storage {
                 scroll_top
             },
         };
-        self.write_json(&self.feed_path, &session);
+        Self::write_json(&self.feed_path, &session);
     }
 
+    #[must_use]
     pub fn load_feed_session(&self) -> FeedSession {
         let mut session = FeedSession::default();
         // `after_tokens` from older builds is simply ignored: the API is
         // page-addressed now, and `current_page` survives as before.
-        let stored: FeedSessionFile = match self.read_json(&self.feed_path) {
+        let stored: FeedSessionFile = match Self::read_json(&self.feed_path) {
             Some(stored) => stored,
             None => return session,
         };
@@ -264,7 +276,8 @@ impl Storage {
         session.tags = stored.tags;
         session.blocked_tags = stored.blocked_tags;
         session.query = stored.query;
-        session.current_page = stored.current_page.clamp(0, MAX_PAGE_INDEX as i64) as usize;
+        let max_page = i64::try_from(MAX_PAGE_INDEX).unwrap_or(i64::MAX);
+        session.current_page = usize::try_from(stored.current_page.clamp(0, max_page)).unwrap_or(0);
         session.has_more = stored.has_more;
         session.scroll_top = if stored.scroll_top.is_nan() || stored.scroll_top < 0.0 {
             0.0
@@ -299,11 +312,12 @@ impl Storage {
             position_ms: position_ms.max(0),
             was_playing,
         };
-        self.write_json(&self.playback_path, &session);
+        Self::write_json(&self.playback_path, &session);
     }
 
+    #[must_use]
     pub fn load_playback_session(&self) -> Option<PlaybackSession> {
-        let stored: PlaybackSessionFile = self.read_json(&self.playback_path)?;
+        let stored: PlaybackSessionFile = Self::read_json(&self.playback_path)?;
         if stored.post.key().is_empty() {
             return None;
         }
@@ -331,13 +345,13 @@ impl Storage {
     // --- library export / import ------------------------------------------
 
     /// `audiogasm-library-v1`, shared with the web app's Saved tab.
+    #[must_use]
     pub fn export_library(&self) -> String {
         let library = Library {
             format: LIBRARY_FORMAT.into(),
             exported_at: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0),
+                .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX)),
             saved: self.saved.clone(),
             history: self.history.clone(),
         };
@@ -380,12 +394,16 @@ impl Storage {
 
         self.saved = saved;
         self.history = history;
-        self.write_posts(&self.saved_path, &self.saved);
-        self.write_posts(&self.history_path, &self.history);
+        Self::write_posts(&self.saved_path, &self.saved);
+        Self::write_posts(&self.history_path, &self.history);
         true
     }
 
     /// Writes the exported library to [`library_path`](Self::library_path).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be written.
     pub fn export_library_file(&self) -> io::Result<PathBuf> {
         let path = self.library_path();
         fs::write(&path, self.export_library())?;
@@ -394,6 +412,10 @@ impl Storage {
 
     /// Reads and imports the library at [`library_path`](Self::library_path).
     /// `Ok(false)` means the file existed but was not a valid library.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be read.
     pub fn import_library_file(&mut self) -> io::Result<bool> {
         let data = fs::read_to_string(self.library_path())?;
         Ok(self.import_library(&data))
@@ -401,7 +423,7 @@ impl Storage {
 
     // --- file helpers ------------------------------------------------------
 
-    fn write_json<T: Serialize>(&self, path: &Path, value: &T) {
+    fn write_json<T: Serialize>(path: &Path, value: &T) {
         let data = match serde_json::to_string_pretty(value) {
             Ok(data) => data,
             Err(err) => {
@@ -420,7 +442,7 @@ impl Storage {
         }
     }
 
-    fn read_json<T: for<'de> Deserialize<'de>>(&self, path: &Path) -> Option<T> {
+    fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Option<T> {
         let data = fs::read_to_string(path).ok()?;
         match serde_json::from_str(&data) {
             Ok(value) => Some(value),
@@ -431,19 +453,18 @@ impl Storage {
         }
     }
 
-    fn write_posts(&self, path: &Path, posts: &[Post]) {
-        self.write_json(path, &posts);
+    fn write_posts(path: &Path, posts: &[Post]) {
+        Self::write_json(path, &posts);
     }
 
-    fn load_posts(&self, path: &Path) -> Vec<Post> {
-        self.read_json::<Vec<Post>>(path).unwrap_or_default()
+    fn load_posts(path: &Path) -> Vec<Post> {
+        Self::read_json::<Vec<Post>>(path).unwrap_or_default()
     }
 }
 
 fn parse_library_posts(value: Option<&serde_json::Value>, cap: usize) -> Vec<Post> {
-    let array = match value.and_then(|v| v.as_array()) {
-        Some(array) => array,
-        None => return Vec::new(),
+    let Some(array) = value.and_then(|v| v.as_array()) else {
+        return Vec::new();
     };
     let mut posts: Vec<Post> = Vec::new();
     for entry in array {
@@ -470,7 +491,12 @@ fn parse_library_post(value: &serde_json::Value) -> Option<Post> {
             .unwrap_or_default()
             .to_string()
     };
-    let int_field = |key: &str| -> i64 { object.get(key).and_then(|v| v.as_i64()).unwrap_or(0) };
+    let int_field = |key: &str| -> i64 {
+        object
+            .get(key)
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(0)
+    };
 
     let name = string_field("name");
     let title = string_field("title");
@@ -479,13 +505,15 @@ fn parse_library_post(value: &serde_json::Value) -> Option<Post> {
         return None;
     }
     // The web app writes numComments; the desktop wrote num_comments.
-    let num_comments = match object.get("num_comments") {
-        Some(value) => value.as_i64().unwrap_or(0),
-        None => object
-            .get("numComments")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0),
-    };
+    let num_comments = object.get("num_comments").map_or_else(
+        || {
+            object
+                .get("numComments")
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(0)
+        },
+        |value| value.as_i64().unwrap_or(0),
+    );
     Some(Post {
         id: string_field("id"),
         name,
@@ -571,7 +599,7 @@ mod tests {
             1
         );
         storage.clear_history();
-        assert!(storage.history().is_empty());
+        assert_eq!(storage.history(), []);
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -610,8 +638,8 @@ mod tests {
         assert!(!loaded.found);
         assert_eq!(loaded.sort, "top");
         assert_eq!(loaded.period, "day");
-        assert!(loaded.tags.is_empty());
-        assert!(loaded.blocked_tags.is_empty());
+        assert_eq!(loaded.tags, "");
+        assert_eq!(loaded.blocked_tags, "");
         assert!(!loaded.has_more);
         let _ = fs::remove_dir_all(&dir);
     }

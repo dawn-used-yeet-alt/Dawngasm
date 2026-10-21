@@ -152,7 +152,10 @@ fn compact_score(score: i64) -> String {
     let magnitude = score.unsigned_abs();
     let body = match magnitude {
         0..=999 => magnitude.to_string(),
-        1_000..=9_999 => format!("{:.1}k", magnitude as f64 / 1_000.0),
+        1_000..=9_999 => format!(
+            "{:.1}k",
+            f64::from(u32::try_from(magnitude).unwrap_or(9_999)) / 1_000.0
+        ),
         10_000..=999_999 => format!("{}k", magnitude / 1_000),
         _ => "999k".to_string(),
     };
@@ -264,17 +267,21 @@ fn draw_player(frame: &mut Frame, app: &App, area: Rect) {
     };
     let current = app.playing_post();
 
-    let title_line = match current {
-        Some(post) => Line::from(vec![
-            Span::styled(format!("{icon} "), icon_style),
-            Span::styled(post.title.clone(), theme::title()),
-            Span::styled(format!("  — u/{}", post.author), theme::muted()),
-        ]),
-        None => Line::from(vec![
-            Span::styled(format!("{icon} "), icon_style),
-            Span::styled("Nothing playing", theme::muted()),
-        ]),
-    };
+    let title_line = current.map_or_else(
+        || {
+            Line::from(vec![
+                Span::styled(format!("{icon} "), icon_style),
+                Span::styled("Nothing playing", theme::muted()),
+            ])
+        },
+        |post| {
+            Line::from(vec![
+                Span::styled(format!("{icon} "), icon_style),
+                Span::styled(post.title.clone(), theme::title()),
+                Span::styled(format!("  — u/{}", post.author), theme::muted()),
+            ])
+        },
+    );
 
     let progress_line = if matches!(status, PlayerStatus::Idle) {
         Line::from(Span::styled(
@@ -299,11 +306,8 @@ fn progress_line(app: &App, width: usize, host: Option<AudioHost>) -> Line<'stat
     } else {
         "--:--".to_string()
     };
-    let volume = format!("{:>3}%", (app.volume * 100.0).round() as i32);
-    let host_label = host
-        .map(|host| theme::host(host).1)
-        .unwrap_or("—")
-        .to_string();
+    let volume = format!("{:>3.0}%", app.volume * 100.0);
+    let host_label = host.map_or("—", |host| theme::host(host).1).to_string();
 
     let fixed = position.chars().count()
         + duration.chars().count()
@@ -343,9 +347,13 @@ fn progress_bar(width: usize, position_ms: i64, duration_ms: i64, seekable: bool
     if !seekable || duration_ms <= 0 {
         return "─".repeat(width);
     }
-    let fraction = (position_ms.max(0) as f64 / duration_ms as f64).clamp(0.0, 1.0);
-    let filled = ((width as f64) * fraction).round() as usize;
-    let filled = filled.min(width);
+    let position = u128::try_from(position_ms.max(0)).unwrap_or(0);
+    let duration = u128::try_from(duration_ms).unwrap_or(0);
+    let track_width = u128::try_from(width).unwrap_or(u128::MAX);
+    let filled = (track_width * position.min(duration) + duration / 2)
+        .checked_div(duration)
+        .unwrap_or(0);
+    let filled = usize::try_from(filled).unwrap_or(width).min(width);
     let mut bar = String::with_capacity(width);
     for cell in 0..width {
         if filled == 0 {
@@ -362,41 +370,53 @@ fn progress_bar(width: usize, position_ms: i64, duration_ms: i64, seekable: bool
 }
 
 fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
-    let line = if let Some(buffer) = &app.input {
-        let label = match app.input_mode {
-            InputMode::Search => "Search: ",
-            InputMode::Tags => "Tags: ",
-            InputMode::BlockedTags => "Blocked tags: ",
-        };
-        let hint = if app.suggestions_visible() {
-            "   ↑/↓ select · Tab complete · Enter submit · Esc hide"
-        } else {
-            "   Enter submit · Esc cancel"
-        };
-        Line::from(vec![
-            Span::styled(label, theme::title()),
-            Span::raw(buffer.clone()),
-            Span::styled("▏", theme::title()),
-            Span::styled(hint, theme::faint()),
-        ])
-    } else if let Some(toast) = &app.toast {
-        let style = if app.toast_error {
-            theme::error()
-        } else {
-            theme::toast()
-        };
-        Line::from(Span::styled(format!(" {toast}"), style))
-    } else if !app.status.is_empty() {
-        let style = if app.status_is_error {
-            theme::error()
-        } else {
-            theme::muted()
-        };
-        Line::from(Span::styled(format!(" {}", app.status), style))
-    } else {
-        Line::from(Span::styled(HINTS, theme::faint()))
-    };
+    let line = app.input.as_ref().map_or_else(
+        || footer_status_line(app),
+        |buffer| {
+            let label = match app.input_mode {
+                InputMode::Search => "Search: ",
+                InputMode::Tags => "Tags: ",
+                InputMode::BlockedTags => "Blocked tags: ",
+            };
+            let hint = if app.suggestions_visible() {
+                "   ↑/↓ select · Tab complete · Enter submit · Esc hide"
+            } else {
+                "   Enter submit · Esc cancel"
+            };
+            Line::from(vec![
+                Span::styled(label, theme::title()),
+                Span::raw(buffer.clone()),
+                Span::styled("▏", theme::title()),
+                Span::styled(hint, theme::faint()),
+            ])
+        },
+    );
     frame.render_widget(Paragraph::new(line), area);
+}
+
+fn footer_status_line(app: &App) -> Line<'static> {
+    app.toast.as_ref().map_or_else(
+        || {
+            if app.status.is_empty() {
+                Line::from(Span::styled(HINTS, theme::faint()))
+            } else {
+                let style = if app.status_is_error {
+                    theme::error()
+                } else {
+                    theme::muted()
+                };
+                Line::from(Span::styled(format!(" {}", app.status), style))
+            }
+        },
+        |toast| {
+            let style = if app.toast_error {
+                theme::error()
+            } else {
+                theme::toast()
+            };
+            Line::from(Span::styled(format!(" {toast}"), style))
+        },
+    )
 }
 
 /// Draws the tag autocomplete dropdown just above the footer. It is transient
@@ -406,7 +426,10 @@ fn draw_suggestions(frame: &mut Frame, app: &App, area: Rect) {
         return;
     }
     let suggestions = app.suggestions();
-    let height = (suggestions.len() as u16 + 2).min(area.height);
+    let height = u16::try_from(suggestions.len())
+        .unwrap_or(u16::MAX)
+        .saturating_add(2)
+        .min(area.height);
     let width = area.width.min(52);
     let popup = Rect {
         x: area.x,
@@ -472,7 +495,13 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         ("q, Ctrl-c", "quit"),
     ];
     // +2 for the border, +2 so a wrapped row never pushes the last key out.
-    let popup = centered_rect(64, keys.len() as u16 + 4, area);
+    let popup = centered_rect(
+        64,
+        u16::try_from(keys.len())
+            .unwrap_or(u16::MAX)
+            .saturating_add(4),
+        area,
+    );
     frame.render_widget(Clear, popup);
     let lines: Vec<Line> = keys
         .iter()

@@ -17,6 +17,7 @@ pub struct Window {
 
 /// The rows visible given a viewport height and a top row, clamped so the last
 /// screenful ends at the last row rather than scrolling past it.
+#[must_use]
 pub fn window(total: usize, visible: usize, offset: usize) -> Window {
     if total == 0 || visible == 0 {
         return Window { start: 0, count: 0 };
@@ -44,19 +45,20 @@ pub enum Thumb {
 /// The thumb grows with the visible fraction and shrinks to a single cell when
 /// almost everything is off screen. `offset` is clamped to the scrollable range
 /// first, which is what makes the thumb sit flush against both ends.
+#[must_use]
 pub fn thumb(total: usize, visible: usize, offset: usize, track: u16) -> Thumb {
     if track == 0 || total == 0 || visible == 0 || total <= visible {
         return Thumb::Hidden;
     }
-    let track = track as u64;
+    let track = u64::from(track);
     let len = (track * visible as u64 / total as u64).clamp(1, track);
     let max_start = track - len;
     let scrollable = (total - visible) as u64;
     let offset = (offset as u64).min(scrollable);
     let start = (max_start * offset).checked_div(scrollable).unwrap_or(0);
     Thumb::Visible {
-        start: start as u16,
-        len: len as u16,
+        start: u16::try_from(start).unwrap_or(u16::MAX),
+        len: u16::try_from(len).unwrap_or(u16::MAX),
     }
 }
 
@@ -80,13 +82,16 @@ pub fn ensure_visible(offset: &mut usize, selected: usize, visible: usize, total
 }
 
 /// Moves `selected` by `delta` rows within `total`, clamping to the ends.
+#[must_use]
 pub fn step(selected: usize, delta: isize, total: usize) -> usize {
     if total == 0 {
         return 0;
     }
     let last = total - 1;
-    let next = selected as isize + delta;
-    next.clamp(0, last as isize) as usize
+    let selected = isize::try_from(selected).unwrap_or(isize::MAX);
+    let last = isize::try_from(last).unwrap_or(isize::MAX);
+    let next = selected.saturating_add(delta).clamp(0, last);
+    usize::try_from(next).unwrap_or(0)
 }
 
 #[cfg(test)]
