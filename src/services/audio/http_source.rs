@@ -34,10 +34,17 @@ impl HttpMediaSource {
     ///
     /// `headers` are attached to every request; audiochan needs its `Origin` /
     /// `Referer` and the agent's cookie jar for the play-intent cookie.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the initial ranged request fails.
     pub fn open(agent: ureq::Agent, url: impl Into<String>) -> io::Result<Self> {
         Self::with_headers(agent, url, Vec::new())
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if the initial ranged request fails.
     pub fn with_headers(
         agent: ureq::Agent,
         url: impl Into<String>,
@@ -144,7 +151,7 @@ impl HttpMediaSource {
             match reader.read(&mut self.chunk[filled..]) {
                 Ok(0) => break,
                 Ok(read) => filled += read,
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
                 Err(error) => return Err(error),
             }
         }
@@ -167,7 +174,8 @@ impl Read for HttpMediaSource {
             self.len = self.len.min(self.pos);
             return Ok(0);
         }
-        let offset = (self.pos - self.chunk_start) as usize;
+        let offset = usize::try_from(self.pos - self.chunk_start)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
         let available = &self.chunk[offset..];
         let count = available.len().min(buf.len());
         buf[..count].copy_from_slice(&available[..count]);
@@ -179,11 +187,15 @@ impl Read for HttpMediaSource {
 impl Seek for HttpMediaSource {
     fn seek(&mut self, from: SeekFrom) -> io::Result<u64> {
         let target = match from {
-            SeekFrom::Start(offset) => offset as i64,
-            SeekFrom::Current(delta) => self.pos as i64 + delta,
-            SeekFrom::End(delta) => self.len as i64 + delta,
+            SeekFrom::Start(offset) => i64::try_from(offset).unwrap_or(i64::MAX),
+            SeekFrom::Current(delta) => i64::try_from(self.pos)
+                .unwrap_or(i64::MAX)
+                .saturating_add(delta),
+            SeekFrom::End(delta) => i64::try_from(self.len)
+                .unwrap_or(i64::MAX)
+                .saturating_add(delta),
         };
-        self.pos = target.max(0) as u64;
+        self.pos = u64::try_from(target.max(0)).unwrap_or(0);
         // The buffered chunk rarely covers an arbitrary seek; drop it so the
         // next read fetches from the new position.
         if !self.chunk_covers(self.pos) {
@@ -222,13 +234,15 @@ fn content_length(response: &ureq::http::Response<ureq::Body>) -> Option<u64> {
 }
 
 fn discard(reader: &mut impl Read, mut count: u64) -> io::Result<()> {
-    let mut scratch = [0u8; 32 * 1024];
+    let mut scratch = vec![0u8; 32 * 1024];
     while count > 0 {
-        let want = (scratch.len() as u64).min(count) as usize;
+        let want = usize::try_from(count)
+            .unwrap_or(usize::MAX)
+            .min(scratch.len());
         match reader.read(&mut scratch[..want]) {
             Ok(0) => break,
             Ok(read) => count -= read as u64,
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
             Err(error) => return Err(error),
         }
     }
@@ -247,7 +261,7 @@ mod tests {
                 .next()
                 .and_then(|t| t.trim().parse::<u64>().ok())
         };
-        assert_eq!(parse("bytes 0-262143/12345678"), Some(12345678));
+        assert_eq!(parse("bytes 0-262143/12345678"), Some(12_345_678));
         assert_eq!(parse("bytes 0-0/*"), None);
         assert_eq!(parse("garbage"), None);
     }

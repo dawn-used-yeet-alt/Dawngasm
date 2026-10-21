@@ -57,8 +57,8 @@ pub fn thumb(total: usize, visible: usize, offset: usize, track: u16) -> Thumb {
     let offset = (offset as u64).min(scrollable);
     let start = (max_start * offset).checked_div(scrollable).unwrap_or(0);
     Thumb::Visible {
-        start: start as u16,
-        len: len as u16,
+        start: u16::try_from(start).unwrap_or(u16::MAX),
+        len: u16::try_from(len).unwrap_or(u16::MAX),
     }
 }
 
@@ -88,8 +88,10 @@ pub fn step(selected: usize, delta: isize, total: usize) -> usize {
         return 0;
     }
     let last = total - 1;
-    let next = selected as isize + delta;
-    next.clamp(0, last as isize) as usize
+    let selected = isize::try_from(selected).unwrap_or(isize::MAX);
+    let last = isize::try_from(last).unwrap_or(isize::MAX);
+    let next = selected.saturating_add(delta).clamp(0, last);
+    usize::try_from(next).unwrap_or(0)
 }
 
 #[cfg(test)]

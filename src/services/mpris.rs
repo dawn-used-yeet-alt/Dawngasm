@@ -306,6 +306,7 @@ impl MprisRoot {
 }
 
 #[zbus::interface(name = "org.mpris.MediaPlayer2")]
+#[allow(clippy::unused_self)] // D-Bus properties require a receiver.
 impl MprisRoot {
     #[zbus(property)]
     const fn can_quit(&self) -> bool {
@@ -366,6 +367,7 @@ impl MprisPlayer {
 }
 
 #[zbus::interface(name = "org.mpris.MediaPlayer2.Player")]
+#[allow(clippy::unused_self)] // D-Bus properties require a receiver.
 impl MprisPlayer {
     #[zbus(property)]
     fn playback_status(&self) -> String {
@@ -421,6 +423,7 @@ impl MprisPlayer {
     }
 
     #[zbus(property)]
+    #[allow(clippy::cast_possible_truncation)] // MPRIS volume is 0.0..=1.0.
     fn set_volume(&self, volume: f64) {
         self.send(Command::SetVolume(volume as f32));
     }
@@ -480,7 +483,9 @@ impl MprisPlayer {
         self.send(Command::SeekAbsolute((position_us / 1000).max(0)));
     }
 
-    fn open_uri(&self, _uri: String) {}
+    fn open_uri(&self, uri: String) {
+        let _ = uri;
+    }
 }
 
 #[cfg(test)]

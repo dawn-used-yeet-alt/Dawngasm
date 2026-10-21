@@ -109,6 +109,7 @@ enum Event {
     },
 }
 
+#[allow(clippy::struct_excessive_bools)] // Independent UI and session flags.
 pub struct App {
     // --- services ---
     /// `None` when no output device could be opened; browsing still works.
@@ -184,6 +185,11 @@ pub struct App {
 impl App {
     /// Opens storage and the audio device, starts the feed worker, and restores
     /// the previous session. The terminal is set up by the caller.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if storage cannot be opened or the feed worker cannot be
+    /// spawned.
     pub fn new() -> Result<Self> {
         let storage = Storage::new()?;
 
@@ -196,7 +202,7 @@ impl App {
         let (event_tx, event_rx) = mpsc::channel();
         let worker = thread::Builder::new()
             .name("audiogasm-feed".into())
-            .spawn(move || feed_worker(command_rx, event_tx))?;
+            .spawn(move || feed_worker(&command_rx, &event_tx))?;
 
         let mpris = Mpris::start();
 
@@ -243,7 +249,7 @@ impl App {
             toast_error: false,
             toast_at: None,
             show_help: false,
-            pending_scroll: Some(feed.scroll_top.round().max(0.0) as usize),
+            pending_scroll: Some(saved_scroll_offset(feed.scroll_top)),
             last_scroll_save: Instant::now(),
             should_quit: false,
         };
@@ -266,6 +272,10 @@ impl App {
     }
 
     /// Runs until the user quits, then saves the sessions.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if drawing or reading terminal events fails.
     pub fn run(&mut self, terminal: &mut DefaultTerminal) -> std::io::Result<()> {
         use ratatui::crossterm::event::{self, Event as TermEvent, KeyEventKind};
 
@@ -412,6 +422,8 @@ impl App {
     // --- input -------------------------------------------------------------
 
     fn on_key(&mut self, key: KeyEvent) {
+        use KeyCode::{Char, Down, End, Enter, Esc, Home, Left, PageDown, PageUp, Right, Tab, Up};
+
         if self.input.is_some() {
             self.on_input_key(key);
             return;
@@ -419,7 +431,6 @@ impl App {
 
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
-        use KeyCode::{Char, Down, End, Enter, Esc, Home, Left, PageDown, PageUp, Right, Tab, Up};
         match key.code {
             Char('c') if ctrl => self.should_quit = true,
             Char('q') => self.should_quit = true,
@@ -597,11 +608,11 @@ impl App {
         if !self.suggestions_visible() {
             return;
         }
-        let len = self.suggestions.len() as isize;
+        let len = self.suggestions.len();
         self.suggestion_selected = Some(match self.suggestion_selected {
-            Some(index) => (index as isize + delta).rem_euclid(len) as usize,
+            Some(index) => index.wrapping_add_signed(delta) % len,
             None if delta > 0 => 0,
-            None => (len - 1) as usize,
+            None => len - 1,
         });
     }
 
@@ -633,7 +644,7 @@ impl App {
 
     /// How far a page key moves, at least one row.
     fn page_step(&self) -> isize {
-        self.viewport_rows.max(1) as isize
+        isize::try_from(self.viewport_rows.max(1)).unwrap_or(isize::MAX)
     }
 
     // --- list navigation ---------------------------------------------------
@@ -730,7 +741,7 @@ impl App {
         }
     }
 
-    fn on_feed_failed(&mut self, message: String, generation: u64) {
+    fn on_feed_failed(&mut self, message: &str, generation: u64) {
         if generation != self.load_generation {
             return;
         }
@@ -852,17 +863,13 @@ impl App {
                 .iter()
                 .position(|post| post.key() == self.playing_key)
             {
-                Some(current) => current as isize + delta,
+                Some(current) => current.wrapping_add_signed(delta),
                 // No current track is not the end of the list: next starts at
                 // the top and previous at the bottom.
                 None if delta > 0 => 0,
-                None => len as isize - 1,
+                None => len - 1,
             };
-            if index < 0 || index as usize >= len {
-                None
-            } else {
-                self.playlist.get(index as usize).cloned()
-            }
+            self.playlist.get(index).cloned()
         };
         match found {
             Some(post) => {
@@ -919,15 +926,15 @@ impl App {
 
     fn set_volume(&mut self, volume: f32) {
         self.apply_volume(volume);
-        let percent = (self.volume * 100.0).round() as i32;
-        self.set_toast(format!("Volume {percent}%"), false);
+        let percent = (self.volume * 100.0).round();
+        self.set_toast(format!("Volume {percent:.0}%"), false);
     }
 
     fn toggle_mute(&mut self) {
         if let Some(previous) = self.muted_volume {
             self.apply_volume(previous);
-            let percent = (previous * 100.0).round() as i32;
-            self.set_toast(format!("Volume {percent}%"), false);
+            let percent = (previous * 100.0).round();
+            self.set_toast(format!("Volume {percent:.0}%"), false);
         } else {
             let previous = self.volume;
             self.apply_volume(0.0);
@@ -938,10 +945,11 @@ impl App {
     }
 
     fn poll_audio(&mut self) {
-        let mut events = Vec::new();
-        if let Some(engine) = self.engine.as_mut() {
-            events = engine.poll();
-        }
+        let events = if let Some(engine) = self.engine.as_mut() {
+            engine.poll()
+        } else {
+            Vec::new()
+        };
         let mut started = false;
         for event in events {
             match event {
@@ -1018,7 +1026,7 @@ impl App {
             &self.query,
             self.page,
             self.has_more,
-            self.scroll as f64,
+            f64::from(u32::try_from(self.scroll).unwrap_or(u32::MAX)),
         );
     }
 
@@ -1128,7 +1136,7 @@ impl App {
                 Event::FeedFailed {
                     message,
                     generation,
-                } => self.on_feed_failed(message, generation),
+                } => self.on_feed_failed(&message, generation),
                 Event::TagsSuggested { tags, generation } => {
                     // Ignore a response for a prefix the buffer has moved past,
                     // or one that arrived after the dropdown was dismissed.
@@ -1152,8 +1160,16 @@ impl App {
     }
 }
 
+/// Converts a persisted scroll offset, saturating malformed values.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn saved_scroll_offset(value: f64) -> usize {
+    // Session data is non-negative screen rows; saturating casts keep a
+    // corrupt file from wrapping the offset.
+    value.round().max(0.0) as usize
+}
+
 /// Fetches pages for the feed, one request at a time.
-fn feed_worker(commands: Receiver<Command>, events: Sender<Event>) {
+fn feed_worker(commands: &Receiver<Command>, events: &Sender<Event>) {
     let mut client = DawngasmClient::from_env();
     while let Ok(command) = commands.recv() {
         let event = match command {

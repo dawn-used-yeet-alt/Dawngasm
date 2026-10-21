@@ -138,7 +138,9 @@ impl Shared {
         let channels = u64::from(self.channels.load(Ordering::Relaxed).max(1));
         let rate = u64::from(self.sample_rate.load(Ordering::Relaxed).max(1));
         let frames = self.yielded.load(Ordering::Relaxed) / channels;
-        self.base_ms.load(Ordering::Relaxed) + (frames as i64 * 1000) / rate as i64
+        let frames = i64::try_from(frames).unwrap_or(i64::MAX);
+        let rate = i64::try_from(rate).unwrap_or(1).max(1);
+        self.base_ms.load(Ordering::Relaxed) + frames.saturating_mul(1000) / rate
     }
 }
 
@@ -222,6 +224,11 @@ pub struct AudioEngine {
 
 impl AudioEngine {
     /// Opens the default output device and starts the decode worker.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no output device can be opened or the decode worker
+    /// cannot be spawned.
     pub fn new() -> Result<Self, String> {
         let mut sink = rodio::DeviceSinkBuilder::open_default_sink().map_err(|e| e.to_string())?;
         // The sink outlives the alternate screen, where its drop notice would
@@ -232,7 +239,7 @@ impl AudioEngine {
         let (worker, receiver) = mpsc::channel();
         thread::Builder::new()
             .name("audiogasm-decode".into())
-            .spawn(move || worker_loop(receiver))
+            .spawn(move || worker_loop(&receiver))
             .map_err(|e| format!("could not start the audio worker: {e}"))?;
 
         Ok(Self {
@@ -260,6 +267,9 @@ impl AudioEngine {
         self.player.set_volume(self.volume);
     }
 
+    /// # Panics
+    ///
+    /// Panics if the current-track mutex is poisoned.
     pub fn status(&self) -> PlayerStatus {
         let current = self.current.lock().unwrap().clone();
         let Some(shared) = current else {
@@ -275,6 +285,9 @@ impl AudioEngine {
         }
     }
 
+    /// # Panics
+    ///
+    /// Panics if the current-track mutex is poisoned.
     pub fn position_ms(&self) -> i64 {
         self.current
             .lock()
@@ -283,6 +296,9 @@ impl AudioEngine {
             .map_or(0, |shared| shared.position_ms())
     }
 
+    /// # Panics
+    ///
+    /// Panics if the current-track mutex is poisoned.
     pub fn duration_ms(&self) -> i64 {
         self.current
             .lock()
@@ -296,6 +312,10 @@ impl AudioEngine {
     }
 
     /// Begins resolving and playing `post`. Replaces whatever was playing.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the current-track mutex is poisoned.
     pub fn play(&mut self, post: Post) {
         self.stop_current();
         self.start_paused = false;
@@ -340,6 +360,10 @@ impl AudioEngine {
     }
 
     /// Seeks to `target_ms`, clamped to the known duration.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a playback-state mutex is poisoned.
     pub fn seek_ms(&mut self, target_ms: i64) {
         let current = self.current.lock().unwrap().clone();
         let Some(shared) = current else {
@@ -368,6 +392,10 @@ impl AudioEngine {
     }
 
     /// Drains finished work. Called once per UI tick.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a playback-state mutex is poisoned.
     pub fn poll(&mut self) -> Vec<AudioEvent> {
         let mut events = Vec::new();
         let current = self.current.lock().unwrap().clone();
@@ -375,19 +403,23 @@ impl AudioEngine {
             return events;
         };
 
-        if let Some(error) = shared.error.lock().unwrap().take() {
+        let error = shared.error.lock().unwrap().take();
+        if let Some(error) = error {
             self.stop_current();
             events.push(AudioEvent::Failed(error));
             return events;
         }
 
         if !self.attached && shared.ready.load(Ordering::SeqCst) {
-            let channels = NonZeroU16::new(shared.channels.load(Ordering::Relaxed) as u16)
-                .unwrap_or(NonZeroU16::new(2).expect("2 is non-zero"));
+            let channels = NonZeroU16::new(
+                u16::try_from(shared.channels.load(Ordering::Relaxed)).unwrap_or(u16::MAX),
+            )
+            .unwrap_or(NonZeroU16::new(2).expect("2 is non-zero"));
             let rate = NonZeroU32::new(shared.sample_rate.load(Ordering::Relaxed))
                 .unwrap_or(NonZeroU32::new(44_100).expect("44100 is non-zero"));
             let duration_ms = shared.duration_ms.load(Ordering::Relaxed);
-            let duration = (duration_ms > 0).then(|| Duration::from_millis(duration_ms as u64));
+            let duration = (duration_ms > 0)
+                .then(|| Duration::from_millis(u64::try_from(duration_ms).unwrap_or_default()));
             self.player.append(TuiSource {
                 shared: Arc::clone(&shared),
                 channels,
@@ -419,7 +451,7 @@ impl AudioEngine {
     }
 }
 
-fn worker_loop(receiver: Receiver<WorkerMessage>) {
+fn worker_loop(receiver: &Receiver<WorkerMessage>) {
     let extractors = extractors::Extractors::new();
     while let Ok(message) = receiver.recv() {
         match message {
@@ -485,7 +517,7 @@ fn decode(shared: &Shared, media: Box<dyn MediaSource>) -> Result<(), String> {
             .channels
             .as_ref()
             .map_or(0, symphonia::core::audio::Channels::count);
-        let channels = channels.clamp(1, u16::MAX as usize) as u16;
+        let channels = u16::try_from(channels).unwrap_or(u16::MAX).max(1);
         let sample_rate = params.sample_rate.unwrap_or(44_100).max(1);
         (
             track.id,
@@ -557,9 +589,9 @@ fn decode(shared: &Shared, media: Box<dyn MediaSource>) -> Result<(), String> {
                     .extend(scratch.iter().copied());
             }
             // A single undecodeable packet is skipped, not fatal.
-            Err(SymphoniaError::DecodeError(_)) => continue,
+            Err(SymphoniaError::DecodeError(_)) => {}
             Err(SymphoniaError::ResetRequired) => {
-                decoder = rebuild_decoder(&mut *format).ok_or_else(|| {
+                decoder = rebuild_decoder(&*format).ok_or_else(|| {
                     "the audio stream changed and could not be resumed".to_string()
                 })?;
             }
@@ -584,7 +616,7 @@ fn seek_reader(
     target_ms: i64,
 ) -> Result<(), String> {
     let seconds = target_ms.div_euclid(1_000);
-    let nanos = (target_ms.rem_euclid(1_000) as u32) * 1_000_000;
+    let nanos = u32::try_from(target_ms.rem_euclid(1_000)).unwrap_or(0) * 1_000_000;
     let time = Time::try_new(seconds, nanos).ok_or_else(|| "invalid seek position".to_string())?;
     format
         .seek(
@@ -599,7 +631,7 @@ fn seek_reader(
     Ok(())
 }
 
-fn rebuild_decoder(format: &mut dyn FormatReader) -> Option<Box<dyn AudioDecoder>> {
+fn rebuild_decoder(format: &dyn FormatReader) -> Option<Box<dyn AudioDecoder>> {
     let params = format
         .default_track(TrackType::Audio)?
         .codec_params
@@ -624,13 +656,13 @@ fn track_duration_ms(track: &Track) -> Option<i64> {
     }
     let rate = track.codec_params.as_ref()?.audio()?.sample_rate?;
     let frames = track.num_frames?;
-    Some((i128::from(frames) * 1000 / i128::from(rate.max(1))) as i64)
+    i64::try_from(i128::from(frames) * 1000 / i128::from(rate.max(1))).ok()
 }
 
 /// Formats a millisecond timestamp as `m:ss` or `h:mm:ss`.
 #[must_use]
 pub fn format_time(ms: i64) -> String {
-    let total = (ms.max(0) as u64) / 1000;
+    let total = u64::try_from(ms.max(0)).unwrap_or(0) / 1000;
     let seconds = total % 60;
     let minutes = (total / 60) % 60;
     let hours = total / 3600;

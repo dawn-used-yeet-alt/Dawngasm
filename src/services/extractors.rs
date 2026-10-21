@@ -85,12 +85,16 @@ impl Extractors {
 
     /// Resolves `post` to a playable byte source, choosing the extractor by
     /// host. This blocks on network I/O, so it runs on the decode worker.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the host is unknown or resolving the stream fails.
     pub fn resolve_media(&self, post: &Post) -> Result<ResolvedMedia> {
         match audio_host::detect_host(post) {
             AudioHost::Soundgasm => self.soundgasm(post),
             AudioHost::Whyp => self.whyp(post),
             AudioHost::Audiochan => self.audiochan(post),
-            AudioHost::Hotaudio => self.hotaudio(post),
+            AudioHost::Hotaudio => Self::hotaudio(post),
             AudioHost::Unknown => Err(err("the post carries no supported audio link")),
         }
     }
@@ -188,7 +192,7 @@ impl Extractors {
 
     /// hotaudio is never a plain URL: the container is decrypted on demand by
     /// [`HotaudioMediaSource`], which knows the track duration from its header.
-    fn hotaudio(&self, post: &Post) -> Result<ResolvedMedia> {
+    fn hotaudio(post: &Post) -> Result<ResolvedMedia> {
         let page_url = audio_host::find_audio_url(post)
             .ok_or_else(|| err("the post carries no hotaudio link"))?;
         let source =
@@ -237,6 +241,10 @@ pub fn find_soundgasm_url(post: &Post) -> Option<String> {
 }
 
 /// soundgasm embeds the stream as `m4a: "https://…"` in its page payload.
+///
+/// # Panics
+///
+/// Panics if the built-in regular expression is invalid.
 pub fn parse_soundgasm_stream_url(html: &str) -> Option<String> {
     static PATTERN: OnceLock<Regex> = OnceLock::new();
     let regex = PATTERN.get_or_init(|| Regex::new(r#"m4a:\s*["']([^"']+)["']"#).expect("m4a"));
@@ -247,6 +255,10 @@ pub fn parse_soundgasm_stream_url(html: &str) -> Option<String> {
 }
 
 /// whyp.it ships an escaped JSON blob in `__NUXT_DATA__`. MP3 wins over FLAC.
+///
+/// # Panics
+///
+/// Panics if a built-in regular expression is invalid.
 pub fn parse_whyp_html(html: &str) -> Option<String> {
     static MP3: OnceLock<Regex> = OnceLock::new();
     static FLAC: OnceLock<Regex> = OnceLock::new();
@@ -266,6 +278,11 @@ pub fn parse_whyp_html(html: &str) -> Option<String> {
         .map(|found| found.as_str().to_string())
 }
 
+/// Extracts the slug from an audiochan post URL.
+///
+/// # Panics
+///
+/// Panics if the built-in regular expression is invalid.
 pub fn extract_audiochan_slug(text: &str) -> Option<String> {
     static PATTERN: OnceLock<Regex> = OnceLock::new();
     let regex = PATTERN
@@ -365,7 +382,7 @@ mod tests {
         match extractors.resolve_media(&post) {
             Ok(_) => panic!("an unknown host should not resolve"),
             Err(error) => {
-                assert!(error.0.contains("no supported audio link"), "{}", error.0)
+                assert!(error.0.contains("no supported audio link"), "{}", error.0);
             }
         }
     }
