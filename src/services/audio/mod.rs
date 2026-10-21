@@ -483,7 +483,10 @@ fn decode(shared: &Shared, media: Box<dyn MediaSource>) -> Result<(), String> {
         let decoder = symphonia::default::get_codecs()
             .make_audio_decoder(params, &AudioDecoderOptions::default())
             .map_err(|error| format!("unsupported audio codec: {error}"))?;
-        let channels = params.channels.as_ref().map(|c| c.count()).unwrap_or(0);
+        let channels = params
+            .channels
+            .as_ref()
+            .map_or(0, symphonia::core::audio::Channels::count);
         let channels = channels.clamp(1, u16::MAX as usize) as u16;
         let sample_rate = params.sample_rate.unwrap_or(44_100).max(1);
         (
