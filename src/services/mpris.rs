@@ -18,7 +18,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use zbus::zvariant::{ObjectPath, Value};
+use zbus::{ObjectPath, Variant};
 
 use crate::models::post::Post;
 
@@ -424,20 +424,20 @@ impl MprisPlayer {
     }
 
     #[zbus(property)]
-    fn metadata(&self) -> HashMap<String, Value<'static>> {
-        let mut map: HashMap<String, Value<'static>> = HashMap::new();
+    fn metadata(&self) -> HashMap<String, Variant<'static>> {
+        let mut map: HashMap<String, Variant<'static>> = HashMap::new();
         let Some(post) = self.snapshot.track() else {
             return map;
         };
         if let Some(path) = self.track_path() {
-            map.insert("mpris:trackid".into(), Value::from(path));
+            map.insert("mpris:trackid".into(), Variant::from(path));
         }
-        map.insert("xesam:title".into(), Value::from(post.title));
-        map.insert("xesam:artist".into(), Value::from(vec![post.author]));
-        map.insert("xesam:album".into(), Value::from("r/gonewildaudio"));
+        map.insert("xesam:title".into(), Variant::from(post.title));
+        map.insert("xesam:artist".into(), Variant::from(vec![post.author]));
+        map.insert("xesam:album".into(), Variant::from("r/gonewildaudio"));
         map.insert(
             "mpris:length".into(),
-            Value::from(self.snapshot.duration_ms().saturating_mul(1000)),
+            Variant::from(self.snapshot.duration_ms().saturating_mul(1000)),
         );
         map
     }

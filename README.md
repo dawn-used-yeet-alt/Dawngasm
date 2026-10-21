@@ -10,7 +10,7 @@ Prebuilt binaries for Linux, macOS, and Windows are on the
 [releases page](https://github.com/dawn-used-yeet-alt/Dawngasm/releases). Each
 archive includes the third-party licenses for its dependencies.
 
-To build from source, install Rust 1.85 or newer and run:
+To build from source, install Rust 1.89 or newer and run:
 
 ```sh
 git clone https://github.com/dawn-used-yeet-alt/Dawngasm.git
