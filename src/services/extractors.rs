@@ -54,6 +54,7 @@ pub const BROWSER_UA: &str =
 /// call and checked on the ranged requests that follow.
 const AUDIOCHAN_ORIGIN: &str = "https://audiochan.com";
 const AUDIOCHAN_REFERER: &str = "https://audiochan.com/";
+const AUDIOCHAN_API: &str = "https://api.audiochan.com";
 
 /// A resolved track: the seekable byte source plus an optional duration the
 /// extractor already knows.
@@ -78,6 +79,9 @@ impl Extractors {
     pub fn new() -> Self {
         let agent = ureq::Agent::config_builder()
             .user_agent(BROWSER_UA)
+            // Statuses are handled by the callers: audiochan's slug lookup has
+            // to tell a 404 (try the older POST route) apart from a real error.
+            .http_status_as_error(false)
             .build()
             .new_agent();
         Self { agent }
@@ -109,18 +113,25 @@ impl Extractors {
     }
 
     fn get(&self, url: &str) -> Result<String> {
+        let (status, body) = self.get_response(url)?;
+        if status != 200 {
+            return Err(err(format!("{url} returned HTTP {status}")));
+        }
+        Ok(body)
+    }
+
+    fn get_response(&self, url: &str) -> Result<(u16, String)> {
         let response = self
             .agent
             .get(url)
             .call()
             .map_err(|e| err(format!("request to {url} failed: {e}")))?;
-        if response.status() != 200 {
-            return Err(err(format!("{url} returned HTTP {}", response.status())));
-        }
-        response
+        let status = response.status().as_u16();
+        let body = response
             .into_body()
             .read_to_string()
-            .map_err(|e| err(format!("failed to read {url}: {e}")))
+            .map_err(|e| err(format!("failed to read {url}: {e}")))?;
+        Ok((status, body))
     }
 
     fn soundgasm(&self, post: &Post) -> Result<ResolvedMedia> {
@@ -143,41 +154,51 @@ impl Extractors {
     /// audiochan needs a short dance: resolve the slug to an id, ask for a play
     /// intent (which sets the playback cookie), exchange that for a signed
     /// stream URL, then stream it with the origin/referer the CDN checks.
+    ///
+    /// The API moves, so both slug lookup methods are supported: the current
+    /// deployment answers `GET /audios/slug/{slug}`, while older ones used
+    /// `POST` for the same route. A 404/405 from GET is therefore retried as a
+    /// POST before the track is reported missing.
     fn audiochan(&self, post: &Post) -> Result<ResolvedMedia> {
         let page_url = audio_host::find_audio_url(post)
             .ok_or_else(|| err("the post carries no audiochan link"))?;
         let slug =
             extract_audiochan_slug(&page_url).ok_or_else(|| err("audiochan slug not found"))?;
 
-        let metadata = self.post_json(
-            &format!("https://api.audiochan.com/audios/slug/{slug}"),
-            None,
-        )?;
+        let metadata = self.audiochan_metadata(&slug)?;
         let audio_id = parse_audiochan_field(&metadata, "id")
             .ok_or_else(|| err("audiochan audio id not found"))?;
 
         // A play intent sets the __Secure-audiochan_playback cookie the stream
         // call below needs. 404 means the track predates intents and streams
         // without one.
-        let play_intent = match self.post_json(
-            &format!("https://api.audiochan.com/audios/{audio_id}/play-intent"),
+        let play_intent = match self.post_json_response(
+            &format!("{AUDIOCHAN_API}/audios/{audio_id}/play-intent"),
             None,
-        ) {
-            Ok(body) => Some(
+        )? {
+            (200, body) => Some(
                 parse_audiochan_field(&body, "play_intent")
                     .ok_or_else(|| err("audiochan play intent not found"))?,
             ),
-            Err(error) if error.0.contains("404") => None,
-            Err(error) => return Err(error),
+            (404, _) => None,
+            (status, _) => {
+                return Err(err(format!("audiochan play intent returned HTTP {status}")));
+            }
         };
 
         let stream_body = play_intent
             .as_ref()
             .map(|intent| serde_json::json!({ "play_intent": intent }).to_string());
-        let stream_json = self.post_json(
-            &format!("https://api.audiochan.com/audios/{audio_id}/stream-url"),
+        let (status, stream_json) = self.post_json_response(
+            &format!("{AUDIOCHAN_API}/audios/{audio_id}/stream-url"),
             stream_body.as_deref(),
         )?;
+        if status != 200 {
+            return Err(err(format!(
+                "audiochan stream url returned HTTP {status}: {}",
+                response_excerpt(&stream_json)
+            )));
+        }
         let stream_url = parse_audiochan_field(&stream_json, "url")
             .ok_or_else(|| err("audiochan stream url not found"))?;
 
@@ -188,6 +209,29 @@ impl Extractors {
                 ("Referer".into(), AUDIOCHAN_REFERER.into()),
             ],
         )
+    }
+
+    /// Resolves an audiochan slug with the current GET route, falling back to
+    /// the older POST route when the deployment does not expose GET.
+    fn audiochan_metadata(&self, slug: &str) -> Result<String> {
+        let url = format!("{AUDIOCHAN_API}/audios/slug/{slug}");
+        let (get_status, get_body) = self.get_response(&url)?;
+        if get_status == 200 {
+            return Ok(get_body);
+        }
+        if matches!(get_status, 404 | 405) {
+            let (post_status, post_body) = self.post_json_response(&url, None)?;
+            if post_status == 200 {
+                return Ok(post_body);
+            }
+            return Err(err(format!(
+                "audiochan slug lookup returned HTTP {get_status} (GET) and {post_status} (POST)"
+            )));
+        }
+        Err(err(format!(
+            "audiochan slug lookup returned HTTP {get_status}: {}",
+            response_excerpt(&get_body)
+        )))
     }
 
     /// hotaudio is never a plain URL: the container is decrypted on demand by
@@ -204,9 +248,9 @@ impl Extractors {
         })
     }
 
-    /// Posts JSON and returns the response body, with the origin/referer
-    /// audiochan's API checks for.
-    fn post_json(&self, url: &str, body: Option<&str>) -> Result<String> {
+    /// Posts JSON and returns the status plus response body, with the
+    /// origin/referer audiochan's API checks for.
+    fn post_json_response(&self, url: &str, body: Option<&str>) -> Result<(u16, String)> {
         let response = self
             .agent
             .post(url)
@@ -216,14 +260,23 @@ impl Extractors {
             // ureq only offers a body-carrying POST builder, so the body-less
             // case sends an empty payload.
             .send(body.unwrap_or_default())
-            .map_err(|e| match e {
-                ureq::Error::StatusCode(code) => err(format!("{url} returned HTTP {code}")),
-                other => err(format!("{url} failed: {other}")),
-            })?;
-        response
+            .map_err(|e| err(format!("{url} failed: {e}")))?;
+        let status = response.status().as_u16();
+        let body = response
             .into_body()
             .read_to_string()
-            .map_err(|e| err(format!("failed to read {url}: {e}")))
+            .map_err(|e| err(format!("failed to read {url}: {e}")))?;
+        Ok((status, body))
+    }
+}
+
+/// A short, single-line response body for an error message.
+fn response_excerpt(body: &str) -> String {
+    let excerpt: String = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    if excerpt.chars().count() > 200 {
+        excerpt.chars().take(200).collect::<String>() + "…"
+    } else {
+        excerpt
     }
 }
 
@@ -278,26 +331,30 @@ pub fn parse_whyp_html(html: &str) -> Option<String> {
         .map(|found| found.as_str().to_string())
 }
 
-/// Extracts the slug from an audiochan post URL.
+/// Extracts the slug from an audiochan post URL. Both the normal `/a/{slug}`
+/// route and the embed route are accepted.
 ///
 /// # Panics
 ///
 /// Panics if the built-in regular expression is invalid.
 pub fn extract_audiochan_slug(text: &str) -> Option<String> {
     static PATTERN: OnceLock<Regex> = OnceLock::new();
-    let regex = PATTERN
-        .get_or_init(|| Regex::new(r"audiochan\.com/a/([a-zA-Z0-9_-]+)").expect("audiochan slug"));
+    let regex = PATTERN.get_or_init(|| {
+        Regex::new(r"(?i)audiochan\.com/(?:embed/)?a/([a-zA-Z0-9_-]+)").expect("audiochan slug")
+    });
     regex
         .captures(text)
         .and_then(|caps| caps.get(1))
         .map(|m| m.as_str().to_string())
 }
 
-/// Reads a top-level string field out of an audiochan JSON response.
+/// Reads a string field out of an audiochan JSON response. The API has served
+/// fields both at the top level and under a `data` envelope; accept either.
 #[must_use]
 pub fn parse_audiochan_field(json_data: &str, field: &str) -> Option<String> {
     let root: Value = serde_json::from_str(json_data).ok()?;
-    root.get(field)?
+    root.get(field)
+        .or_else(|| root.get("data").and_then(|data| data.get(field)))?
         .as_str()
         .map(std::string::ToString::to_string)
 }
@@ -341,6 +398,10 @@ mod tests {
             extract_audiochan_slug("https://audiochan.com/a/some-track_1").as_deref(),
             Some("some-track_1")
         );
+        assert_eq!(
+            extract_audiochan_slug("https://audiochan.com/embed/a/some-track_1").as_deref(),
+            Some("some-track_1")
+        );
         assert_eq!(extract_audiochan_slug("https://example.com/a/x"), None);
     }
 
@@ -353,6 +414,10 @@ mod tests {
         assert_eq!(
             parse_audiochan_field(r#"{"url":"https://cdn/x.m4a"}"#, "url").as_deref(),
             Some("https://cdn/x.m4a")
+        );
+        assert_eq!(
+            parse_audiochan_field(r#"{"data":{"id":"nested"}}"#, "id").as_deref(),
+            Some("nested")
         );
         assert_eq!(parse_audiochan_field("not json", "id"), None);
         assert_eq!(parse_audiochan_field(r#"{"other":1}"#, "id"), None);

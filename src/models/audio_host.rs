@@ -86,8 +86,10 @@ fn patterns() -> &'static Patterns {
             r#"(?i)https?://(?:www\.)?whyp\.it/(?:tracks|t)/[a-zA-Z0-9_%~.-]+(?:/[a-zA-Z0-9_%~.-]+)?(?:\?[^"'\s<>\)\]]*)?"#,
         )
         .expect("whyp pattern"),
-        audiochan: Regex::new(r"(?i)https?://(?:www\.)?audiochan\.com/a/([a-zA-Z0-9_-]+)")
-            .expect("audiochan pattern"),
+        audiochan: Regex::new(
+            r"(?i)https?://(?:www\.)?audiochan\.com/(?:embed/)?a/([a-zA-Z0-9_-]+)",
+        )
+        .expect("audiochan pattern"),
         hotaudio: Regex::new(
             r#"(?i)https?://(?:www\.)?hotaudio\.net/u/[a-zA-Z0-9_%~.-]+/[a-zA-Z0-9_%~.-]+(?:\?[^"'\s<>\)\]]*)?"#,
         )
@@ -135,7 +137,7 @@ pub fn host_of_url(url: &str) -> AudioHost {
         AudioHost::Soundgasm
     } else if lower.contains("whyp.it/tracks/") || lower.contains("whyp.it/t/") {
         AudioHost::Whyp
-    } else if lower.contains("audiochan.com/a/") {
+    } else if lower.contains("audiochan.com/a/") || lower.contains("audiochan.com/embed/a/") {
         AudioHost::Audiochan
     } else if lower.contains("hotaudio.net/u/") {
         AudioHost::Hotaudio
@@ -172,6 +174,10 @@ mod tests {
         );
         assert_eq!(
             detect_host(&post("https://audiochan.com/a/someid", "")),
+            AudioHost::Audiochan
+        );
+        assert_eq!(
+            detect_host(&post("https://audiochan.com/embed/a/someid", "")),
             AudioHost::Audiochan
         );
         assert_eq!(
