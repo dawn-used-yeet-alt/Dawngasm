@@ -70,3 +70,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --locked --all-targets
       - run: cargo build --locked --release
+      - name: Upload Linux binary
+        if: matrix.os == 'ubuntu-24.04'
+        uses: actions/upload-artifact@v7
+        with:
+          name: dawngasm-tui-x86_64-unknown-linux-gnu
+          path: target/release/dawngasm-tui
+          if-no-files-found: error

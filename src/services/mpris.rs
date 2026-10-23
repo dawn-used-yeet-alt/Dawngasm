@@ -22,9 +22,9 @@ use zbus::{ObjectPath, Variant};
 
 use crate::models::post::Post;
 
-const BUS_NAME: &str = "org.mpris.MediaPlayer2.audiogasm";
+const BUS_NAME: &str = "org.mpris.MediaPlayer2.dawngasm";
 const OBJECT_PATH: &str = "/org/mpris/MediaPlayer2";
-const TRACK_PATH_PREFIX: &str = "/com/audiogasm/track/";
+const TRACK_PATH_PREFIX: &str = "/com/dawngasm/track/";
 
 /// A request from a media key or a panel, applied on the UI thread.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -189,7 +189,7 @@ impl Mpris {
         let (sender, commands) = mpsc::channel();
         let thread_snapshot = Arc::clone(&snapshot);
         let spawned = std::thread::Builder::new()
-            .name("audiogasm-mpris".into())
+            .name("dawngasm-mpris".into())
             .spawn(move || {
                 if let Err(error) = serve(thread_snapshot, sender) {
                     // A bare TTY or an SSH login usually has no session bus, and
@@ -322,11 +322,11 @@ impl MprisRoot {
     }
     #[zbus(property)]
     fn identity(&self) -> String {
-        "Audiogasm".into()
+        "Dawngasm".into()
     }
     #[zbus(property)]
     fn desktop_entry(&self) -> String {
-        "com.audiogasm.Audiogasm".into()
+        "com.dawngasm.Dawngasm".into()
     }
     #[zbus(property)]
     fn supported_uri_schemes(&self) -> Vec<String> {

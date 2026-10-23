@@ -1,9 +1,9 @@
-//! Audiogasm TUI entry point.
+//! Dawngasm TUI entry point.
 //!
 //! Sets up the terminal, runs the event loop, and restores the terminal even
 //! when the loop returns an error.
 
-use audiogasm_tui::App;
+use dawngasm_tui::App;
 
 fn main() -> anyhow::Result<()> {
     // Built before the alternate screen so a startup failure (no data dir, no

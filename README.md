@@ -18,13 +18,13 @@ cd Dawngasm
 cargo build --release
 ```
 
-The binary is `target/release/audiogasm-tui` (`audiogasm-tui.exe` on Windows).
+The binary is `target/release/dawngasm-tui` (`dawngasm-tui.exe` on Windows).
 Linux builds need the ALSA headers. Install `libasound2-dev` on Debian/Ubuntu,
 `alsa-lib-devel` on Fedora, or `alsa-lib` on Arch.
 
 ## Usage
 
-Run `audiogasm-tui`. Press `?` for the full key list. `j`/`k` move, `Enter`
+Run `dawngasm-tui`. Press `?` for the full key list. `j`/`k` move, `Enter`
 plays, `/` searches, `T` edits tag filters with autocomplete, `t` changes the
 sort, `e` changes the time window, and `s` saves a post.
 

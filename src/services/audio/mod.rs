@@ -238,7 +238,7 @@ impl AudioEngine {
 
         let (worker, receiver) = mpsc::channel();
         thread::Builder::new()
-            .name("audiogasm-decode".into())
+            .name("dawngasm-decode".into())
             .spawn(move || worker_loop(&receiver))
             .map_err(|e| format!("could not start the audio worker: {e}"))?;
 

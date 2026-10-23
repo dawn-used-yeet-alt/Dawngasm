@@ -105,8 +105,8 @@ impl HttpMediaSource {
         }
         let response = match request.call() {
             Ok(response) => response,
-            // A range past the end is not a failure: the caller's read just
-            // returns 0 from here.
+            // An agent configured with `http_status_as_error` still reports a
+            // range past the end as an error.
             Err(ureq::Error::StatusCode(416)) => {
                 self.chunk.clear();
                 self.chunk_start = start;
@@ -120,6 +120,13 @@ impl HttpMediaSource {
             }
         };
         let status = response.status().as_u16();
+        // A range past the end is not a failure: the caller's read just returns
+        // 0 from here. Some agents hand this back as a normal response.
+        if status == 416 {
+            self.chunk.clear();
+            self.chunk_start = start;
+            return Ok(());
+        }
         if status != 200 && status != 206 {
             return Err(io::Error::other(format!(
                 "range request for {} returned HTTP {status}",

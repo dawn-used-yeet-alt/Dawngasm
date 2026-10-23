@@ -18,7 +18,7 @@ use crate::services::dawngasm::MAX_PAGE_INDEX;
 
 pub const MAX_SESSION_PLAYLIST: usize = 100;
 pub const MAX_HISTORY: usize = 50;
-pub const LIBRARY_FORMAT: &str = "audiogasm-library-v1";
+pub const LIBRARY_FORMAT: &str = "dawngasm-library-v1";
 pub const MAX_IMPORT_SAVED: usize = 200;
 pub const MAX_IMPORT_HISTORY: usize = 50;
 
@@ -110,8 +110,8 @@ pub struct Storage {
 }
 
 impl Storage {
-    /// `$XDG_DATA_HOME/audiogasm`, `$HOME/.local/share/audiogasm` on Unix,
-    /// or `%APPDATA%\audiogasm` on Windows.
+    /// `$XDG_DATA_HOME/dawngasm`, `$HOME/.local/share/dawngasm` on Unix,
+    /// or `%APPDATA%\dawngasm` on Windows.
     ///
     /// # Errors
     ///
@@ -132,7 +132,7 @@ impl Storage {
                     "no data directory found (set XDG_DATA_HOME, HOME, or APPDATA)",
                 )
             })?;
-        Self::in_dir(&base.join("audiogasm"))
+        Self::in_dir(&base.join("dawngasm"))
     }
 
     /// # Errors
@@ -344,7 +344,7 @@ impl Storage {
 
     // --- library export / import ------------------------------------------
 
-    /// `audiogasm-library-v1`, shared with the web app's Saved tab.
+    /// `dawngasm-library-v1`, shared with the web app's Saved tab.
     #[must_use]
     pub fn export_library(&self) -> String {
         let library = Library {
@@ -532,7 +532,7 @@ mod tests {
     use super::*;
 
     fn temp_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("audiogasm-storage-test-{name}"));
+        let dir = std::env::temp_dir().join(format!("dawngasm-storage-test-{name}"));
         let _ = fs::remove_dir_all(&dir);
         dir
     }
@@ -741,7 +741,7 @@ mod tests {
         let dir = temp_dir("library-web");
         let mut storage = Storage::in_dir(&dir).unwrap();
         let json = r#"{
-            "format": "audiogasm-library-v1",
+            "format": "dawngasm-library-v1",
             "exported_at": 1,
             "saved": [{"id":"a","name":"t3_a","title":"t","url":"https://x",
                        "author":"me","selftext":"","score":3,"numComments":7,
@@ -758,7 +758,7 @@ mod tests {
         let dir = temp_dir("library-partial");
         let mut storage = Storage::in_dir(&dir).unwrap();
         let json = r#"{
-            "format": "audiogasm-library-v1",
+            "format": "dawngasm-library-v1",
             "saved": [{"name":"t3_a","title":"t"},
                       {"name":"","title":"t","url":"https://x"},
                       {"name":"t3_c","title":"t","url":"https://y"}],
