@@ -70,9 +70,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          name="audiogasm-tui-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          name="dawngasm-tui-${GITHUB_REF_NAME}-${{ matrix.target }}"
           mkdir -p "dist/$name"
-          cp "target/${{ matrix.target }}/release/audiogasm-tui" "dist/$name/"
+          cp "target/${{ matrix.target }}/release/dawngasm-tui" "dist/$name/"
           cp LICENSE README.md THIRD_PARTY_LICENSES.md "dist/$name/"
           tar -czf "$name.tar.gz" -C dist "$name"
 
@@ -80,16 +80,16 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $name = "audiogasm-tui-${{ github.ref_name }}-${{ matrix.target }}"
+          $name = "dawngasm-tui-${{ github.ref_name }}-${{ matrix.target }}"
           New-Item -ItemType Directory -Force "dist/$name" | Out-Null
-          Copy-Item "target/${{ matrix.target }}/release/audiogasm-tui.exe" "dist/$name/"
+          Copy-Item "target/${{ matrix.target }}/release/dawngasm-tui.exe" "dist/$name/"
           Copy-Item LICENSE, README.md, THIRD_PARTY_LICENSES.md "dist/$name/"
           Compress-Archive -Path "dist/$name/*" -DestinationPath "$name.zip"
 
       - uses: actions/upload-artifact@v7
         with:
-          name: audiogasm-tui-${{ matrix.target }}
-          path: audiogasm-tui-*
+          name: dawngasm-tui-${{ matrix.target }}
+          path: dawngasm-tui-*
           if-no-files-found: error
 
   publish:

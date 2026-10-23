@@ -1,18 +1,18 @@
 [package]
-name = "audiogasm-tui"
-version = "0.1.1"
+name = "dawngasm-tui"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.89"
 license = "GPL-3.0-or-later"
-description = "Audiogasm TUI: browse and play audio posts from the dawngasm index in a terminal."
+description = "Dawngasm TUI: browse and play audio posts from the dawngasm index in a terminal."
 publish = false
 
 [lib]
-name = "audiogasm_tui"
+name = "dawngasm_tui"
 path = "src/lib.rs"
 
 [[bin]]
-name = "audiogasm-tui"
+name = "dawngasm-tui"
 path = "src/main.rs"
 
 [dependencies]

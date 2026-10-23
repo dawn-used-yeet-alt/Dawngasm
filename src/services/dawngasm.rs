@@ -32,7 +32,7 @@ use crate::models::post::Post;
 /// for free, I'm keeping it up until I see abuse from it. So if you want the
 /// greater good, just don't abuse it, thx.
 pub const DEFAULT_API_BASE: &str = "https://dawngasm.dawnusedyeet.workers.dev";
-pub const DEFAULT_USER_AGENT: &str = concat!("audiogasm-tui/", env!("CARGO_PKG_VERSION"));
+pub const DEFAULT_USER_AGENT: &str = concat!("dawngasm-tui/", env!("CARGO_PKG_VERSION"));
 
 /// `/tags` requires at least this many characters in the prefix.
 pub const MIN_TAG_PREFIX: usize = 2;

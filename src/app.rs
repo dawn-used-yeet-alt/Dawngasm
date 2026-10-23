@@ -201,7 +201,7 @@ impl App {
         let (command_tx, command_rx) = mpsc::channel();
         let (event_tx, event_rx) = mpsc::channel();
         let worker = thread::Builder::new()
-            .name("audiogasm-feed".into())
+            .name("dawngasm-feed".into())
             .spawn(move || feed_worker(&command_rx, &event_tx))?;
 
         let mpris = Mpris::start();

@@ -159,8 +159,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "audiogasm-tui"
-version = "0.1.1"
+name = "dawngasm-tui"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-io",

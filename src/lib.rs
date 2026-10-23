@@ -1,4 +1,4 @@
-//! Audiogasm TUI: terminal client for browsing and playing audio posts from the
+//! Dawngasm TUI: terminal client for browsing and playing audio posts from the
 //! dawngasm index.
 //!
 //! The crate is split so the headless pieces (models, host detection, parsers,
