@@ -40,7 +40,9 @@ pub fn capture_and_save() -> Result<PathBuf, String> {
             |failure| runtime_hint(&failure.error),
         )
     })?;
-    let result = plugin.call(METHOD_CLEARANCE_CAPTURE, json!({}))?;
+    let result = plugin
+        .call(METHOD_CLEARANCE_CAPTURE, json!({}))
+        .map_err(|error| error.to_string())?;
     let captured: Captured = serde_json::from_value(result)
         .map_err(|error| format!("the clearance extension returned an invalid result: {error}"))?;
     if captured.cookie.trim().is_empty() {

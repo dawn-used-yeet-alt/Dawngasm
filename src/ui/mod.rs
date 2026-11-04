@@ -21,7 +21,7 @@ use crate::services::audio::{format_time, PlayerStatus};
 
 /// The always-visible key hints, shown when nothing more urgent is in the
 /// footer.
-const HINTS: &str = " ? help  / search  T tags  B block  Enter play  Space pause  n/p track  ←/→ seek  -/+ vol  s save  C cf  t sort  e window  Tab view  q quit";
+const HINTS: &str = " ? help  / search  : cmds  T tags  B block  Enter play  Space pause  n/p track  ←/→ seek  -/+ vol  s save  C cf  t sort  e window  Tab view  q quit";
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let chunks = Layout::vertical([
@@ -59,6 +59,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     draw_player(frame, app, chunks[2]);
     draw_footer(frame, app, chunks[3]);
     draw_suggestions(frame, app, frame.area());
+    draw_command_palette(frame, app, frame.area());
 
     if app.show_help {
         draw_help(frame, frame.area());
@@ -140,6 +141,7 @@ fn draw_list(frame: &mut Frame, app: &App, area: Rect) {
             app.is_playing(post),
             app.is_saved(post),
             selected,
+            app.annotations.get(post.key()),
         ));
     }
     frame.render_widget(Paragraph::new(lines), area);
@@ -174,12 +176,20 @@ fn row_line(
     playing: bool,
     saved: bool,
     selected: bool,
+    annotations: Option<&crate::services::extensions::PostAnnotations>,
 ) -> Line<'static> {
     let host = audio_host::detect_host(post);
     let (host_style, label) = theme::host(host);
     let badge = format!("{label:<badge$}", badge = theme::HOST_BADGE_WIDTH);
+    let badges = annotations.map_or_else(String::new, |annotations| annotations.badges.join(" "));
+    let badges = truncate(&badges, 16);
+    let extra_cols = if badges.is_empty() {
+        0
+    } else {
+        badges.chars().count() + 1
+    };
     // score(6) + marker(1) + space(1) + saved(1) + space(1) + badge(9) + space(1)
-    let prefix_cols = 20;
+    let prefix_cols = 20 + extra_cols;
     let score = format!("▲{:<4} ", compact_score(post.score));
     let marker = if playing { "▶" } else { " " };
     let saved_mark = if saved { "♥" } else { " " };
@@ -220,6 +230,9 @@ fn row_line(
         ),
         Span::styled(format!("{badge} "), host_style),
     ];
+    if !badges.is_empty() {
+        spans.push(Span::styled(format!("{badges} "), theme::muted()));
+    }
     if show_meta {
         let pad = " ".repeat(title_cols.saturating_sub(title.chars().count()));
         spans.push(Span::styled(title, title_style));
@@ -377,8 +390,11 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
                 InputMode::Search => "Search: ",
                 InputMode::Tags => "Tags: ",
                 InputMode::BlockedTags => "Blocked tags: ",
+                InputMode::Command => "Command: ",
             };
-            let hint = if app.suggestions_visible() {
+            let hint = if app.input_mode == InputMode::Command {
+                "   ↑/↓ select · Tab complete · Enter run · Esc cancel"
+            } else if app.suggestions_visible() {
                 "   ↑/↓ select · Tab complete · Enter submit · Esc hide"
             } else {
                 "   Enter submit · Esc cancel"
@@ -468,8 +484,63 @@ fn draw_suggestions(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(lines).block(block), popup);
 }
 
+/// Draws the `:` command palette, filtered by what the user has typed.
+fn draw_command_palette(frame: &mut Frame, app: &App, area: Rect) {
+    if app.input_mode != InputMode::Command || app.input.is_none() {
+        return;
+    }
+    let commands = app.command_matches();
+    if commands.is_empty() {
+        return;
+    }
+    // Keep the highlighted command on screen when there are more commands
+    // than rows, rather than letting ratatui clip the selection away.
+    let rows = usize::from(area.height.saturating_sub(2)).max(1);
+    let visible = commands.len().min(rows);
+    let selected = app.command_selected().unwrap_or(0).min(commands.len() - 1);
+    let start = selected.saturating_sub(visible.saturating_sub(1));
+    let height = u16::try_from(visible)
+        .unwrap_or(u16::MAX)
+        .saturating_add(2)
+        .min(area.height);
+    let width = area.width.min(72);
+    let popup = Rect {
+        x: area.x,
+        y: area.y + area.height.saturating_sub(1 + height),
+        width,
+        height,
+    };
+    let inner_width = width.saturating_sub(2) as usize;
+    let lines: Vec<Line> = commands
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(visible)
+        .map(|(index, command)| {
+            let title = format!(
+                "{}:{} — {}",
+                command.extension.manifest.id,
+                command.command.id,
+                command.command.display_title()
+            );
+            let title = truncate(&title, inner_width);
+            let style = if app.command_selected() == Some(index) {
+                theme::selected().add_modifier(Modifier::BOLD)
+            } else {
+                theme::muted()
+            };
+            Line::from(Span::styled(title, style))
+        })
+        .collect();
+    let block = ratatui::widgets::Block::bordered()
+        .title(" Commands ")
+        .border_style(theme::title());
+    frame.render_widget(Clear, popup);
+    frame.render_widget(Paragraph::new(lines).block(block), popup);
+}
+
 fn draw_help(frame: &mut Frame, area: Rect) {
-    let keys: [(&str, &str); 24] = [
+    let keys: [(&str, &str); 25] = [
         ("j / k, ↑ / ↓", "move the selection"),
         ("g / G, Home / End", "jump to the first or last post"),
         ("PgDn / PgUp, Ctrl-d / Ctrl-u", "move a page at a time"),
@@ -485,6 +556,7 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         ("Tab, Shift-Tab", "cycle Feed → Saved → History"),
         ("f / v / y", "go straight to Feed / Saved / History"),
         ("/", "search every indexed subreddit"),
+        (":", "run an extension command"),
         ("T", "edit tag filters with /tags autocomplete"),
         ("B", "block tags with /tags autocomplete"),
         ("[ / ]", "previous or next page"),

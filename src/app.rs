@@ -9,6 +9,7 @@
 //! current view, and only the visible window is turned into spans, so a feed of
 //! hundreds of posts costs the same to draw as a feed of ten.
 
+use std::collections::BTreeMap;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -22,6 +23,11 @@ use crate::services::audio::{
     AudioEngine, AudioEvent, PlayerStatus, MAX_VOLUME, NUDGE_LARGE_MS, NUDGE_SMALL_MS,
 };
 use crate::services::dawngasm::{DawngasmClient, TagSuggestion, MAX_PAGE_INDEX, MIN_TAG_PREFIX};
+use crate::services::extensions::{
+    self, CommandDecl, EnrichResult, Extension, Extensions, FeedPage, FilterResult,
+    PostAnnotations, CAP_ENRICH, CAP_FEED, CAP_FILTER, METHOD_COMMAND_INVOKE, METHOD_ENRICH_APPLY,
+    METHOD_FEED_FETCH, METHOD_FEED_TAGS, METHOD_FILTER_APPLY,
+};
 use crate::services::mpris::{self, Mpris, PlaybackStatus};
 use crate::services::storage::Storage;
 use crate::ui;
@@ -66,6 +72,7 @@ pub(crate) enum InputMode {
     Search,
     Tags,
     BlockedTags,
+    Command,
 }
 
 impl InputMode {
@@ -92,11 +99,19 @@ enum Command {
     },
 }
 
+/// One extension command shown in the `:` palette.
+#[derive(Clone, Debug)]
+pub(crate) struct CommandMatch {
+    pub extension: Extension,
+    pub command: CommandDecl,
+}
+
 /// Results from the feed worker.
 enum Event {
     FeedLoaded {
         posts: Vec<Post>,
         has_more: bool,
+        annotations: BTreeMap<String, PostAnnotations>,
         generation: u64,
     },
     FeedFailed {
@@ -106,6 +121,16 @@ enum Event {
     TagsSuggested {
         tags: Vec<TagSuggestion>,
         generation: u64,
+    },
+    /// The feed worker finished discovering extensions. Commands are cached on
+    /// the UI side so opening the palette never waits on a plugin scan.
+    ExtensionsLoaded {
+        commands: Vec<CommandMatch>,
+    },
+    /// A `command` extension finished on its worker thread.
+    CommandFinished {
+        message: String,
+        is_error: bool,
     },
 }
 
@@ -119,11 +144,16 @@ pub struct App {
     mpris: Option<Mpris>,
     commands: Option<Sender<Command>>,
     events: Receiver<Event>,
+    /// A clone kept so extension commands can report back from their own
+    /// thread instead of blocking the UI while the plugin runs.
+    event_tx: Sender<Event>,
     /// Joined on exit so the worker's channel is observed to close.
     worker: Option<JoinHandle<()>>,
 
     // --- feed ---
     pub(crate) feed_posts: Vec<Post>,
+    /// Badges and tags contributed by `post.enrich` extensions, keyed by post.
+    pub(crate) annotations: BTreeMap<String, PostAnnotations>,
     /// Whether the API reported another page after the current one.
     has_more: bool,
     pub(crate) page: usize,
@@ -154,6 +184,11 @@ pub struct App {
     suggestion_due: Option<Instant>,
     /// Invalidates responses that arrive after the buffer changed again.
     suggestion_generation: u64,
+    /// Highlighted entry in the `:` command palette.
+    command_selected: Option<usize>,
+    /// Commands discovered by the feed worker, so the palette does not load
+    /// plugins on the UI thread.
+    extension_commands: Vec<CommandMatch>,
 
     // --- list geometry ---
     pub(crate) selected: usize,
@@ -200,9 +235,10 @@ impl App {
 
         let (command_tx, command_rx) = mpsc::channel();
         let (event_tx, event_rx) = mpsc::channel();
+        let worker_events = event_tx.clone();
         let worker = thread::Builder::new()
             .name("dawngasm-feed".into())
-            .spawn(move || feed_worker(&command_rx, &event_tx))?;
+            .spawn(move || feed_worker(&command_rx, &worker_events))?;
 
         let mpris = Mpris::start();
 
@@ -215,8 +251,10 @@ impl App {
             mpris,
             commands: Some(command_tx),
             events: event_rx,
+            event_tx,
             worker: Some(worker),
             feed_posts: Vec::new(),
+            annotations: BTreeMap::new(),
             has_more: feed.has_more,
             page: 0,
             load_generation: 0,
@@ -236,6 +274,8 @@ impl App {
             suggestions_hidden: false,
             suggestion_due: None,
             suggestion_generation: 0,
+            command_selected: None,
+            extension_commands: Vec::new(),
             selected: 0,
             scroll: 0,
             viewport_rows: 0,
@@ -475,6 +515,7 @@ impl App {
             Char('m') => self.toggle_mute(),
 
             Char('/') => self.begin_input(InputMode::Search),
+            Char(':') => self.begin_input(InputMode::Command),
             Char('T') => self.begin_input(InputMode::Tags),
             Char('B') => self.begin_input(InputMode::BlockedTags),
             Char('r') => self.request_page(self.page),
@@ -491,6 +532,10 @@ impl App {
 
     fn on_input_key(&mut self, key: KeyEvent) {
         use KeyCode::{Backspace, Char, Down, Enter, Esc, Tab, Up};
+        if self.input_mode == InputMode::Command {
+            self.on_command_key(key);
+            return;
+        }
         match key.code {
             Esc => {
                 // The first Esc dismisses the dropdown; a second closes the
@@ -531,29 +576,212 @@ impl App {
         }
     }
 
+    /// Handles keys while the `:` command palette is open.
+    fn on_command_key(&mut self, key: KeyEvent) {
+        use KeyCode::{Backspace, Char, Down, Enter, Esc, Tab, Up};
+        match key.code {
+            Esc => self.end_input(),
+            Enter => {
+                let typed = self.input.as_deref().unwrap_or_default().trim().to_string();
+                let matches = self.command_matches();
+                // An explicit arrow selection wins, so two plugins exposing
+                // the same command id are still individually reachable.
+                let command = self
+                    .command_selected
+                    .and_then(|index| matches.get(index))
+                    .cloned()
+                    .or_else(|| {
+                        matches
+                            .iter()
+                            .find(|candidate| candidate.command.id == typed)
+                            .cloned()
+                    })
+                    .or_else(|| matches.first().cloned());
+                self.end_input();
+                if let Some(command) = command {
+                    self.run_command_match(command);
+                } else if typed.trim().is_empty() {
+                    self.set_toast("No extension commands are installed.", false);
+                } else {
+                    self.set_toast(
+                        format!("No extension command matches “{}”.", typed.trim()),
+                        true,
+                    );
+                }
+            }
+            Tab => {
+                let id = self
+                    .command_matches()
+                    .get(self.command_selected.unwrap_or(0))
+                    .map(|candidate| candidate.command.id.clone());
+                if let (Some(id), Some(buffer)) = (id, self.input.as_mut()) {
+                    buffer.clone_from(&id);
+                }
+            }
+            Up => self.move_command(-1),
+            Down => self.move_command(1),
+            Backspace => {
+                if let Some(buffer) = self.input.as_mut() {
+                    buffer.pop();
+                }
+                self.command_selected = None;
+            }
+            Char(character) => {
+                if let Some(buffer) = self.input.as_mut() {
+                    buffer.push(character);
+                }
+                self.command_selected = None;
+            }
+            _ => {}
+        }
+    }
+
+    fn move_command(&mut self, delta: isize) {
+        let len = self.command_matches().len();
+        if len == 0 {
+            self.command_selected = None;
+            return;
+        }
+        self.command_selected = Some(match self.command_selected {
+            Some(index) => wrap_index(index, delta, len),
+            None if delta > 0 => 0,
+            None => len - 1,
+        });
+    }
+
+    /// Commands whose id or title matches the current palette text.
+    pub(crate) fn command_matches(&self) -> Vec<CommandMatch> {
+        let query = self
+            .input
+            .as_deref()
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase();
+        self.extension_commands
+            .iter()
+            .filter(|candidate| {
+                query.is_empty()
+                    || candidate.command.id.to_ascii_lowercase().contains(&query)
+                    || candidate
+                        .command
+                        .display_title()
+                        .to_ascii_lowercase()
+                        .contains(&query)
+                    || candidate
+                        .extension
+                        .manifest
+                        .id
+                        .to_ascii_lowercase()
+                        .contains(&query)
+            })
+            .cloned()
+            .collect()
+    }
+
+    pub(crate) const fn command_selected(&self) -> Option<usize> {
+        self.command_selected
+    }
+
+    fn run_command(&mut self, value: &str) {
+        let matches = self.command_matches();
+        let selected = self.command_selected.unwrap_or(0);
+        let command = matches
+            .iter()
+            .find(|candidate| candidate.command.id == value)
+            .cloned()
+            .or_else(|| matches.get(selected).cloned())
+            .or_else(|| matches.first().cloned());
+        let Some(command) = command else {
+            self.set_toast("No extension commands are installed.", false);
+            return;
+        };
+        self.run_command_match(command);
+    }
+
+    fn run_command_match(&mut self, command: CommandMatch) {
+        let CommandMatch {
+            extension,
+            command: declaration,
+        } = command;
+        let context = serde_json::json!({
+            "view": self.view.label(),
+            "query": &self.query,
+            "tags": &self.tags,
+            "blocked_tags": &self.blocked_tags,
+            "post": self.selected_post(),
+        });
+        // Read the title before moving the id into the request.
+        let title = declaration.display_title().to_string();
+        let params = serde_json::json!({"id": declaration.id, "context": context});
+        let event_tx = self.event_tx.clone();
+        let thread_title = title.clone();
+        // A plugin can take its whole timeout; running it here would freeze
+        // the terminal, so the result arrives as an event like feed work does.
+        let spawned = thread::Builder::new()
+            .name("dawngasm-command".into())
+            .spawn(move || {
+                let event = match extension.call(METHOD_COMMAND_INVOKE, params) {
+                    Ok(value) => Event::CommandFinished {
+                        message: value
+                            .get("message")
+                            .and_then(serde_json::Value::as_str)
+                            .map_or_else(
+                                || format!("{thread_title} finished."),
+                                ToString::to_string,
+                            ),
+                        is_error: value
+                            .get("error")
+                            .and_then(serde_json::Value::as_bool)
+                            .unwrap_or(false),
+                    },
+                    Err(error) => Event::CommandFinished {
+                        message: format!("{thread_title}: {error}"),
+                        is_error: true,
+                    },
+                };
+                let _ = event_tx.send(event);
+            });
+        if let Err(error) = spawned {
+            self.set_toast(format!("Could not start {title}: {error}"), true);
+        } else {
+            self.set_toast(format!("Running {title}…"), false);
+        }
+    }
+
     /// Opens a prompt with the current value, so a filter can be amended
     /// rather than retyped. Submitting an empty buffer clears it.
     fn begin_input(&mut self, mode: InputMode) {
         self.input_mode = mode;
+        self.command_selected = None;
         self.input = Some(match mode {
             InputMode::Search => self.query.clone(),
             InputMode::Tags => self.tags.clone(),
             InputMode::BlockedTags => self.blocked_tags.clone(),
+            InputMode::Command => String::new(),
         });
         self.input_changed();
     }
 
     fn end_input(&mut self) {
         self.input = None;
+        self.command_selected = None;
         self.clear_suggestions();
     }
 
     fn submit_input(&mut self) {
         let value = self.input.take().unwrap_or_default().trim().to_string();
+        if self.input_mode == InputMode::Command {
+            // Close the palette before running, so the next key press is not
+            // routed to the command handler.
+            self.end_input();
+            self.run_command(&value);
+            return;
+        }
         match self.input_mode {
             InputMode::Search => self.query = value,
             InputMode::Tags => self.tags = value,
             InputMode::BlockedTags => self.blocked_tags = value,
+            InputMode::Command => {}
         }
         self.clear_suggestions();
         self.request_page(0);
@@ -611,7 +839,7 @@ impl App {
         }
         let len = self.suggestions.len();
         self.suggestion_selected = Some(match self.suggestion_selected {
-            Some(index) => index.wrapping_add_signed(delta) % len,
+            Some(index) => wrap_index(index, delta, len),
             None if delta > 0 => 0,
             None => len - 1,
         });
@@ -716,12 +944,19 @@ impl App {
         }
     }
 
-    fn on_feed_loaded(&mut self, posts: Vec<Post>, has_more: bool, generation: u64) {
+    fn on_feed_loaded(
+        &mut self,
+        posts: Vec<Post>,
+        has_more: bool,
+        annotations: BTreeMap<String, PostAnnotations>,
+        generation: u64,
+    ) {
         if generation != self.load_generation {
             return;
         }
         self.has_more = has_more && self.page < MAX_PAGE_INDEX;
         self.feed_posts = posts;
+        self.annotations = annotations;
         self.loading = false;
         let restored = self.pending_scroll.take().unwrap_or(0);
         if self.view == View::Feed {
@@ -1145,8 +1380,9 @@ impl App {
                 Event::FeedLoaded {
                     posts,
                     has_more,
+                    annotations,
                     generation,
-                } => self.on_feed_loaded(posts, has_more, generation),
+                } => self.on_feed_loaded(posts, has_more, annotations, generation),
                 Event::FeedFailed {
                     message,
                     generation,
@@ -1163,6 +1399,12 @@ impl App {
                         self.suggestion_selected = None;
                     }
                 }
+                Event::ExtensionsLoaded { commands } => {
+                    self.extension_commands = commands;
+                }
+                Event::CommandFinished { message, is_error } => {
+                    self.set_toast(message, is_error);
+                }
             }
         }
     }
@@ -1171,6 +1413,17 @@ impl App {
         self.toast = Some(message.into());
         self.toast_error = is_error;
         self.toast_at = Some(Instant::now());
+    }
+}
+
+/// Moves a highlighted index by `delta`, wrapping around `len` entries.
+/// `len` must be non-zero; callers check that before stepping.
+const fn wrap_index(current: usize, delta: isize, len: usize) -> usize {
+    let step = delta.unsigned_abs() % len;
+    if delta < 0 {
+        (current + len - step) % len
+    } else {
+        (current + step) % len
     }
 }
 
@@ -1185,6 +1438,23 @@ fn saved_scroll_offset(value: f64) -> usize {
 /// Fetches pages for the feed, one request at a time.
 fn feed_worker(commands: &Receiver<Command>, events: &Sender<Event>) {
     let mut client = DawngasmClient::from_env();
+    let extensions = Extensions::global();
+    let discovered = extensions
+        .commands()
+        .into_iter()
+        .map(|candidate| CommandMatch {
+            extension: candidate.plugin.clone(),
+            command: candidate.command.clone(),
+        })
+        .collect();
+    if events
+        .send(Event::ExtensionsLoaded {
+            commands: discovered,
+        })
+        .is_err()
+    {
+        return;
+    }
     while let Ok(command) = commands.recv() {
         let event = match command {
             Command::LoadFeed {
@@ -1195,21 +1465,29 @@ fn feed_worker(commands: &Receiver<Command>, events: &Sender<Event>) {
                 query,
                 page,
                 generation,
-            } => match client.fetch_posts(&sort, &period, &tags, &exclude_tags, &query, page) {
-                Ok((posts, has_more)) => Event::FeedLoaded {
+            } => match load_feed(
+                &mut client,
+                &extensions,
+                &sort,
+                &period,
+                &tags,
+                &exclude_tags,
+                &query,
+                page,
+            ) {
+                Ok((posts, has_more, annotations)) => Event::FeedLoaded {
                     posts,
                     has_more,
+                    annotations,
                     generation,
                 },
-                Err(error) => Event::FeedFailed {
-                    message: error.to_string(),
+                Err(message) => Event::FeedFailed {
+                    message,
                     generation,
                 },
             },
             Command::SuggestTags { prefix, generation } => {
-                // Autocomplete is best-effort: a rate limit or transient
-                // failure just leaves the dropdown empty.
-                let tags = client.suggest_tags(&prefix).unwrap_or_default();
+                let tags = suggest_tags(&mut client, &extensions, &prefix);
                 Event::TagsSuggested { tags, generation }
             }
         };
@@ -1217,6 +1495,125 @@ fn feed_worker(commands: &Receiver<Command>, events: &Sender<Event>) {
             break;
         }
     }
+}
+
+/// Loads one page through a `feed` extension when present, then applies the
+/// filter and enrich hooks. Hooks are best-effort: a broken plugin leaves the
+/// page usable rather than turning a feed load into an error.
+#[allow(clippy::too_many_arguments, clippy::cognitive_complexity)] // One feed pipeline.
+fn load_feed(
+    client: &mut DawngasmClient,
+    extensions: &Extensions,
+    sort: &str,
+    period: &str,
+    tags: &str,
+    exclude_tags: &str,
+    query: &str,
+    page: usize,
+) -> Result<(Vec<Post>, bool, BTreeMap<String, PostAnnotations>), String> {
+    let plugin_feed = extensions.find(CAP_FEED).and_then(|plugin| {
+        plugin
+            .call(
+                METHOD_FEED_FETCH,
+                serde_json::json!({
+                    "sort": sort,
+                    "period": period,
+                    "tags": tags,
+                    "exclude_tags": exclude_tags,
+                    "query": query,
+                    "page": page,
+                }),
+            )
+            .ok()
+    });
+    let (mut posts, has_more) = match plugin_feed.filter(|value| !extensions::is_unhandled(value)) {
+        Some(value) => {
+            let feed: FeedPage = serde_json::from_value(value)
+                .map_err(|error| format!("feed extension returned an invalid page: {error}"))?;
+            (feed.posts, feed.has_more)
+        }
+        None => client
+            .fetch_posts(sort, period, tags, exclude_tags, query, page)
+            .map_err(|error| error.to_string())?,
+    };
+
+    // Filters and enrichers chain in priority order. Each filter sees the
+    // posts the previous one kept, and annotations from every enricher merge.
+    for plugin in extensions.find_all(CAP_FILTER) {
+        let Ok(value) = plugin.call(
+            METHOD_FILTER_APPLY,
+            serde_json::json!({
+                "posts": &posts,
+                "filters": {
+                    "tags": tags,
+                    "exclude_tags": exclude_tags,
+                    "query": query,
+                },
+            }),
+        ) else {
+            continue;
+        };
+        if extensions::is_unhandled(&value) {
+            continue;
+        }
+        let Ok(result) = serde_json::from_value::<FilterResult>(value) else {
+            continue;
+        };
+        if let Some(keep) = result.keep {
+            let keep: std::collections::HashSet<&str> = keep.iter().map(String::as_str).collect();
+            posts.retain(|post| keep.contains(post.key()));
+        }
+    }
+
+    let mut annotations: BTreeMap<String, PostAnnotations> = BTreeMap::new();
+    for plugin in extensions.find_all(CAP_ENRICH) {
+        let Ok(value) = plugin.call(METHOD_ENRICH_APPLY, serde_json::json!({"posts": &posts}))
+        else {
+            continue;
+        };
+        if extensions::is_unhandled(&value) {
+            continue;
+        }
+        let Ok(result) = serde_json::from_value::<EnrichResult>(value) else {
+            continue;
+        };
+        for (key, extra) in result.annotations {
+            let entry = annotations.entry(key).or_default();
+            for badge in extra.badges {
+                if !entry.badges.contains(&badge) {
+                    entry.badges.push(badge);
+                }
+            }
+            for tag in extra.tags {
+                if !entry.tags.contains(&tag) {
+                    entry.tags.push(tag);
+                }
+            }
+        }
+    }
+
+    Ok((posts, has_more, annotations))
+}
+
+/// Asks a `feed` extension for tag suggestions, falling back to the API.
+fn suggest_tags(
+    client: &mut DawngasmClient,
+    extensions: &Extensions,
+    prefix: &str,
+) -> Vec<TagSuggestion> {
+    extensions
+        .find(CAP_FEED)
+        .and_then(|plugin| {
+            plugin
+                .call(METHOD_FEED_TAGS, serde_json::json!({"prefix": prefix}))
+                .ok()
+        })
+        .filter(|value| !extensions::is_unhandled(value))
+        .and_then(|value| {
+            let tags = value.get("tags").cloned().unwrap_or(value);
+            serde_json::from_value::<Vec<TagSuggestion>>(tags).ok()
+        })
+        .unwrap_or_else(|| client.suggest_tags(prefix).unwrap_or_default())
 }
 
 fn sort_index(sort: &str) -> usize {
@@ -1257,6 +1654,15 @@ fn choose_tag(value: &mut String, tag: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn highlight_navigation_wraps_in_both_directions() {
+        assert_eq!(wrap_index(0, -1, 3), 2);
+        assert_eq!(wrap_index(0, 1, 3), 1);
+        assert_eq!(wrap_index(2, 1, 3), 0);
+        assert_eq!(wrap_index(1, -5, 3), 2);
+        assert_eq!(wrap_index(1, 5, 3), 0);
+    }
 
     #[test]
     fn the_active_tag_is_the_part_after_the_last_comma() {

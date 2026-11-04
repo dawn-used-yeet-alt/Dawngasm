@@ -53,34 +53,25 @@ reports that the webview runtime is missing.
 
 ## Extensions
 
-Dawngasm looks for executables named `dawngasm-plugin-*` in `plugins/` next to
-the binary, next to the binary itself, `<data dir>/plugins/`, and every
-directory in `DAWNGASM_PLUGIN_PATH` (split like `PATH`). Extensions are separate
-processes speaking JSON over stdin/stdout. Rust has no stable ABI, so this keeps
-plugins independent of the compiler and crate versions used to build the TUI,
-and a crashing plugin cannot take the player down.
+Dawngasm extensions are separate executables named `dawngasm-plugin-*`. They
+add audio hosts, feed sources, post filters and badges, Cloudflare clearance,
+and user-invokable commands without rebuilding the TUI. Plugins speak JSON over
+stdin/stdout, so they are independent of the host's compiler and crate versions
+and a crash cannot take the player down.
 
-A plugin answers `--describe` with a manifest:
+Discovery, the manifest and protocol, every capability, and a minimal example
+are in [EXTENSIONS.md](EXTENSIONS.md). The short version:
 
-```json
-{"id":"clearance","name":"Cloudflare clearance","version":"0.4.0","capabilities":["clearance"]}
-```
-
-`run` reads one request and writes one response:
-
-```json
-{"protocol":1,"method":"extract.resolve","params":{"url":"https://example.com/track","selftext":"","title":"","author":""}}
-{"protocol":1,"ok":true,"result":{"url":"https://cdn.example/track.m4a","headers":{"Referer":"https://example.com/"},"duration_ms":180000}}
-```
-
-Capabilities:
-
-- `clearance`: answer `clearance.capture` with `{"cookie":"...","user_agent":"..."}`.
-- `extract`: answer `extract.resolve` for a post the built-in extractors do not
-  recognize. The result is a plain ranged HTTP media URL. Hotaudio remains
-  built in because it needs a decrypting stream, not a URL.
-
-If several plugins advertise the same capability, the first one found wins.
+- `plugin --describe` prints a manifest; `plugin run` reads one JSON request
+  and writes one JSON response.
+- `extract` plugins can match hosts, decline with `handled: false`, and opt in
+  to overriding a built-in extractor.
+- `feed`, `post.filter` and `post.enrich` plugins can replace or post-process
+  the feed; `command` plugins appear in the `:` palette.
+- `dawngasm-tui extensions list` shows what was found and what failed, and
+  `dawngasm-tui extensions call ...` invokes a method by hand.
+- Every call has a timeout and an output cap, so a hung or flooding plugin is
+  killed rather than freezing the app.
 
 ## License
 
