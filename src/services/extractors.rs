@@ -26,6 +26,7 @@ use crate::models::post::Post;
 
 use super::audio::hotaudio::HotaudioMediaSource;
 use super::audio::http_source::HttpMediaSource;
+use super::hotaudio_auth::HotaudioClearance;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -239,8 +240,12 @@ impl Extractors {
     fn hotaudio(post: &Post) -> Result<ResolvedMedia> {
         let page_url = audio_host::find_audio_url(post)
             .ok_or_else(|| err("the post carries no hotaudio link"))?;
-        let source =
-            HotaudioMediaSource::open(&page_url).map_err(|e| err(format!("hotaudio: {e}")))?;
+        // Read the pair on every resolve: the webview saves it from a child
+        // process while this worker keeps running, so a cached copy would stay
+        // stale until restart.
+        let clearance = HotaudioClearance::load_default();
+        let source = HotaudioMediaSource::open(&page_url, clearance.as_ref())
+            .map_err(|error| hotaudio_error(&error))?;
         let duration = source.duration_ms();
         Ok(ResolvedMedia {
             media: Box::new(source),
@@ -267,6 +272,18 @@ impl Extractors {
             .read_to_string()
             .map_err(|e| err(format!("failed to read {url}: {e}")))?;
         Ok((status, body))
+    }
+}
+
+/// Adds the one actionable hint when hotaudio is gated by Cloudflare.
+fn hotaudio_error(error: &std::io::Error) -> Error {
+    let message = format!("hotaudio: {error}");
+    if message.contains("site challenge") {
+        err(format!(
+            "{message} — press C to open the Cloudflare clearance window"
+        ))
+    } else {
+        err(message)
     }
 }
 

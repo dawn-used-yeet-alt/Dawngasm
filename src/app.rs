@@ -484,6 +484,7 @@ impl App {
             Char('e') => self.cycle_period(),
             Char('x') => self.export_library(),
             Char('i') => self.import_library(),
+            Char('C') => self.capture_cloudflare_clearance(),
             _ => {}
         }
     }
@@ -973,6 +974,20 @@ impl App {
         }
         if std::mem::take(&mut self.advance_playlist) {
             self.step_track(1);
+        }
+    }
+
+    // --- hotaudio clearance ------------------------------------------------
+
+    /// Opens the system webview in a child process, waits for the Cloudflare
+    /// challenge, and saves the cookie/UA pair for the next hotaudio resolve.
+    fn capture_cloudflare_clearance(&mut self) {
+        match crate::services::webview::run_clearance_process() {
+            Ok(()) => self.set_toast(
+                "Cloudflare clearance saved for hotaudio. Press Enter to retry.",
+                false,
+            ),
+            Err(error) => self.set_toast(format!("Cloudflare clearance: {error}"), true),
         }
     }
 

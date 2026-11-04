@@ -21,7 +21,7 @@ use crate::services::audio::{format_time, PlayerStatus};
 
 /// The always-visible key hints, shown when nothing more urgent is in the
 /// footer.
-const HINTS: &str = " ? help  / search  T tags  B block  Enter play  Space pause  n/p track  ←/→ seek  -/+ vol  s save  t sort  e window  Tab view  q quit";
+const HINTS: &str = " ? help  / search  T tags  B block  Enter play  Space pause  n/p track  ←/→ seek  -/+ vol  s save  C cf  t sort  e window  Tab view  q quit";
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let chunks = Layout::vertical([
@@ -469,7 +469,7 @@ fn draw_suggestions(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_help(frame: &mut Frame, area: Rect) {
-    let keys: [(&str, &str); 23] = [
+    let keys: [(&str, &str); 24] = [
         ("j / k, ↑ / ↓", "move the selection"),
         ("g / G, Home / End", "jump to the first or last post"),
         ("PgDn / PgUp, Ctrl-d / Ctrl-u", "move a page at a time"),
@@ -492,6 +492,7 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         ("e", "cycle the time window (switches sort to top)"),
         ("r", "reload the current page"),
         ("x / i", "export / import the library file"),
+        ("C", "open hotaudio in a webview for Cloudflare clearance"),
         ("q, Ctrl-c", "quit"),
     ];
     // +2 for the border, +2 so a wrapped row never pushes the last key out.

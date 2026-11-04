@@ -118,6 +118,17 @@ impl Storage {
     /// Returns an error if no data directory is configured or the storage
     /// directory cannot be created.
     pub fn new() -> io::Result<Self> {
+        Self::in_dir(&Self::default_dir()?)
+    }
+
+    /// The directory [`new`](Self::new) uses. Exposed so sibling files (the
+    /// hotaudio clearance) land in the same place without constructing a
+    /// [`Storage`] or duplicating the platform rules.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no data directory is configured.
+    pub fn default_dir() -> io::Result<PathBuf> {
         let base = std::env::var_os("XDG_DATA_HOME")
             .map(PathBuf::from)
             .filter(|p| p.is_absolute())
@@ -132,7 +143,7 @@ impl Storage {
                     "no data directory found (set XDG_DATA_HOME, HOME, or APPDATA)",
                 )
             })?;
-        Self::in_dir(&base.join("dawngasm"))
+        Ok(base.join("dawngasm"))
     }
 
     /// # Errors
