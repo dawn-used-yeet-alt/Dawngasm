@@ -92,6 +92,7 @@ mod tests {
         assert_eq!(captured.user_agent, "Mozilla/5.0");
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_missing_webkit_library_gets_a_package_hint() {
         let message = runtime_hint(
