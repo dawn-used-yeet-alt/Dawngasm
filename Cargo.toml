@@ -1,6 +1,6 @@
 [package]
 name = "dawngasm-tui"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.89"
 license = "GPL-3.0-or-later"
@@ -14,6 +14,14 @@ path = "src/lib.rs"
 [[bin]]
 name = "dawngasm-tui"
 path = "src/main.rs"
+
+[features]
+default = ["webview"]
+# A system-webview window for passing hotaudio's Cloudflare challenge. It uses
+# the OS webview (WebKitGTK, WKWebView, WebView2), not a bundled browser, but it
+# does add those system libraries to the build. `--no-default-features` keeps a
+# headless build that only needs the terminal and audio libraries.
+webview = ["dep:wry", "dep:tao"]
 
 [dependencies]
 # Terminal UI + its crossterm backend (re-exported as `ratatui::crossterm`).
@@ -45,9 +53,18 @@ anyhow = "1"
 # Early error reporting + a decent backtrace without hand-rolling it.
 thiserror = "2"
 
-# The hotaudio protocol client, at the latest released revision. The desktop
-# app used an old pinned commit of this same crate.
-hotaudio = { package = "hotaudio-rs", git = "https://github.com/dawn-used-yeet-alt/hotaudio-extractor.git", rev = "4966c7040805b98ac272c178ba34a45b6a76264c" }
+# The hotaudio protocol client, at the latest release (v2.1.2). v2 adds the
+# Cloudflare clearance pair (`Client::with_cookie` + `Client::with_user_agent`)
+# and reports challenge pages as `Error::Challenge`. The CLI feature is off: the
+# library is the only part this app uses.
+hotaudio = { package = "hotaudio-rs", git = "https://github.com/dawn-used-yeet-alt/hotaudio-extractor.git", rev = "3cccd2c9f127527e67bf5571134e88a735a86ef4", default-features = false }
+
+# System webview for the hotaudio Cloudflare clearance. `wry` renders with the
+# platform's own webview (WebKitGTK on Linux, WKWebView on macOS, WebView2 on
+# Windows); `tao` supplies the window and event loop around it. Both are behind
+# the default `webview` feature.
+wry = { version = "0.57", optional = true }
+tao = { version = "0.37", default-features = false, features = ["rwh_06"], optional = true }
 
 # MPRIS over D-Bus for media keys and desktop panels. async-io gives zbus'
 # async object server an executor to run on. D-Bus integration is Linux-only;

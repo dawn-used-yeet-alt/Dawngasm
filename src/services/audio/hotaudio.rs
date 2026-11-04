@@ -24,6 +24,8 @@ use hotaudio::range::{self, RangeSource};
 use hotaudio::{block_on, Error as HotaudioError, HOTAUDIO_API_BASE, HOTAUDIO_UA};
 use symphonia::core::io::MediaSource;
 
+use crate::services::hotaudio_auth::HotaudioClearance;
+
 /// How many decrypted segments stay resident. A segment is roughly 15 s of
 /// audio, and playback walks forward, so a handful is enough for smooth
 /// decoding while a 30-minute track still costs a few megabytes rather than
@@ -59,6 +61,9 @@ impl RangeSource for SessionRange {
                 None,
             )
             .await?;
+        if let Some(detail) = response.challenge() {
+            return Err(HotaudioError::Challenge(format!("range fetch: {detail}")));
+        }
         match response.status {
             206 => Ok(response.body),
             // A mirror that ignores `Range` sends the whole body; slice locally.
@@ -113,8 +118,19 @@ impl HotaudioMediaSource {
     ///
     /// Returns an error if the handshake fails or the container header is
     /// missing or malformed.
-    pub fn open(page_url: &str) -> io::Result<Self> {
-        let api = Client::api();
+    pub fn open(page_url: &str, clearance: Option<&HotaudioClearance>) -> io::Result<Self> {
+        let mut api = Client::api();
+        let mut bulk = Client::bulk();
+        if let Some(clearance) = clearance {
+            if clearance.has_cookie() {
+                api = api.with_cookie(clearance.cookie.as_str());
+                bulk = bulk.with_cookie(clearance.cookie.as_str());
+            }
+            if !clearance.user_agent.trim().is_empty() {
+                api = api.with_user_agent(clearance.user_agent.as_str());
+                bulk = bulk.with_user_agent(clearance.user_agent.as_str());
+            }
+        }
         let handshake = block_on(listen::load_handshake(
             &api,
             page_url,
@@ -131,7 +147,7 @@ impl HotaudioMediaSource {
         }
 
         let session = SessionRange {
-            client: Client::bulk(),
+            client: bulk,
             url: initial.url,
         };
         let (_file_length, header_length) =
