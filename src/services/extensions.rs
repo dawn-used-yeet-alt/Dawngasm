@@ -74,6 +74,7 @@ use std::io::{Read, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc;
 use std::sync::{Arc, OnceLock, PoisonError, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -124,6 +125,10 @@ const PREFIX: &str = "dawngasm-plugin-";
 const DESCRIBE: &str = "--describe";
 const RUN: &str = "run";
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
+/// How long to wait for the reader threads after the child exits. A forked
+/// descendant can inherit the pipes and keep them open forever, so this is
+/// bounded rather than a plain `join()`.
+const READER_GRACE: Duration = Duration::from_secs(1);
 const DEFAULT_CALL_TIMEOUT: Duration = Duration::from_secs(15);
 const DEFAULT_DESCRIBE_TIMEOUT: Duration = Duration::from_secs(3);
 const DEFAULT_MAX_OUTPUT: usize = 1024 * 1024;
@@ -176,7 +181,9 @@ impl Manifest {
         self.capability(capability).is_some()
     }
 
-    /// The highest priority across all capabilities.
+    /// The highest priority across all capabilities. Dispatch orders by the
+    /// priority of the capability being used; this is a convenience for
+    /// callers that want one ordering score for the whole plugin.
     #[must_use]
     pub fn priority(&self) -> i32 {
         self.capabilities
@@ -362,7 +369,9 @@ impl Extension {
         let id = next_request_id();
         let request = Request {
             protocol,
-            id: &id,
+            // Version 1 plugins predate request ids; sending one to a strict
+            // deserializer would break a plugin that used to work.
+            id: (protocol >= 2).then_some(id.as_str()),
             method,
             params,
         };
@@ -446,7 +455,17 @@ impl Extension {
                 ));
             }
         }
-        if let Some(response_id) = response.id {
+        if protocol >= 2 && response.id.is_none() {
+            return Err(ExtensionError::new(
+                &self.manifest.id,
+                "protocol",
+                format!(
+                    "{} did not echo the request id",
+                    self.manifest.display_name()
+                ),
+            ));
+        }
+        if let Some(response_id) = response.id.as_deref() {
             if response_id != id {
                 return Err(ExtensionError::new(
                     &self.manifest.id,
@@ -615,6 +634,9 @@ impl Extensions {
 
     /// Re-scans the plugin directories and replaces the process-wide set.
     /// Calls already holding the old [`Arc`] keep using it.
+    ///
+    /// This is public API for embedders; the TUI itself loads once per process
+    /// and does not call it yet.
     #[must_use]
     pub fn reload() -> Arc<Self> {
         let lock = EXTENSIONS.get_or_init(|| RwLock::new(Arc::new(Self::load())));
@@ -629,8 +651,8 @@ impl Extensions {
     pub fn load() -> Self {
         let mut plugins = Vec::new();
         let mut failures = Vec::new();
-        for path in candidates() {
-            match describe(&path) {
+        for (path, result) in describe_all(candidates()) {
+            match result {
                 Ok(manifest) => plugins.push(Extension { manifest, path }),
                 Err(error) => failures.push(ExtensionFailure { path, error }),
             }
@@ -652,12 +674,36 @@ impl Extensions {
             .iter()
             .filter(|plugin| plugin.supports(capability))
             .collect();
-        // Stable, so equal priorities keep discovery order. The priority is
-        // read from this capability rather than the whole manifest, so one
-        // high-priority capability does not reorder the others.
-        found.sort_by(|a, b| {
-            capability_priority(b, capability).cmp(&capability_priority(a, capability))
-        });
+        sort_by_capability_priority(&mut found, capability);
+        found
+    }
+
+    /// The first plugin advertising `capability` and answering `method`.
+    #[must_use]
+    pub fn find_for_method(&self, capability: &str, method: &str) -> Option<&Extension> {
+        self.find_all_for_method(capability, method)
+            .into_iter()
+            .next()
+    }
+
+    /// Every plugin advertising `capability` and answering `method`, highest
+    /// priority first.
+    ///
+    /// A capability's `methods` list narrows it: a plugin that only declares
+    /// `feed.tags` is not offered `feed.fetch`, even though it advertises the
+    /// `feed` capability.
+    #[must_use]
+    pub fn find_all_for_method(&self, capability: &str, method: &str) -> Vec<&Extension> {
+        let mut found: Vec<&Extension> = self
+            .plugins
+            .iter()
+            .filter(|plugin| {
+                plugin
+                    .capability(capability)
+                    .is_some_and(|declaration| declaration.handles_method(method))
+            })
+            .collect();
+        sort_by_capability_priority(&mut found, capability);
         found
     }
 
@@ -666,21 +712,24 @@ impl Extensions {
     #[must_use]
     pub fn extractors_for_urls(&self, urls: &[&str]) -> Vec<&Extension> {
         let hosts: Vec<String> = urls.iter().filter_map(|url| host_of(url)).collect();
-        let mut found: Vec<(&Extension, u8, i32)> = self
+        let mut found: Vec<(&Extension, (u8, usize), i32)> = self
             .plugins
             .iter()
             .filter_map(|plugin| {
                 let capability = plugin.capability(CAP_EXTRACT)?;
+                if !capability.handles_method(METHOD_EXTRACT_RESOLVE) {
+                    return None;
+                }
                 let specificity = if capability.hosts.is_empty() {
-                    0
+                    (0, 0)
                 } else {
                     hosts
                         .iter()
                         .map(|host| host_specificity(&capability.hosts, host))
                         .max()
-                        .unwrap_or(0)
+                        .unwrap_or((0, 0))
                 };
-                if !capability.hosts.is_empty() && specificity == 0 {
+                if !capability.hosts.is_empty() && specificity.0 == 0 {
                     return None;
                 }
                 Some((plugin, specificity, capability.priority))
@@ -701,7 +750,10 @@ impl Extensions {
     pub fn commands(&self) -> Vec<CommandRef<'_>> {
         let mut commands = Vec::new();
         for plugin in &self.plugins {
-            if !plugin.supports(CAP_COMMAND) {
+            let Some(capability) = plugin.capability(CAP_COMMAND) else {
+                continue;
+            };
+            if !capability.handles_method(METHOD_COMMAND_INVOKE) {
                 continue;
             }
             for command in &plugin.manifest.commands {
@@ -729,12 +781,6 @@ impl Extensions {
     #[must_use]
     pub fn plugins(&self) -> &[Extension] {
         &self.plugins
-    }
-
-    /// The loaded manifests, for diagnostics.
-    #[must_use]
-    pub fn manifests(&self) -> Vec<&Manifest> {
-        self.plugins.iter().map(|plugin| &plugin.manifest).collect()
     }
 
     /// Every candidate that could not be described.
@@ -833,18 +879,32 @@ fn capability_priority(plugin: &Extension, capability: &str) -> i32 {
         .map_or(0, |declaration| declaration.priority)
 }
 
-fn host_specificity(patterns: &[String], host: &str) -> u8 {
-    let mut best = 0;
+/// Sorts highest priority first. Stable, so equal priorities keep discovery
+/// order. The priority is read from `capability` rather than the whole
+/// manifest, so one high-priority capability does not reorder the others.
+fn sort_by_capability_priority(found: &mut [&Extension], capability: &str) {
+    found.sort_by(|a, b| {
+        capability_priority(b, capability).cmp(&capability_priority(a, capability))
+    });
+}
+
+/// How specifically `patterns` match `host`.
+///
+/// The first component ranks an exact domain above a wildcard. The second is
+/// the length of the matched suffix, so `*.cdn.example.com` outranks
+/// `*.example.com` for `cdn.example.com`.
+fn host_specificity(patterns: &[String], host: &str) -> (u8, usize) {
+    let mut best = (0, 0);
     for pattern in patterns {
         if !host_matches(std::slice::from_ref(pattern), host) {
             continue;
         }
-        let trimmed = pattern.trim();
-        best = best.max(if trimmed.contains('*') || trimmed.starts_with('.') {
-            1
-        } else {
-            2
-        });
+        let trimmed = pattern.trim().trim_end_matches('.');
+        let score = trimmed
+            .strip_prefix("*.")
+            .or_else(|| trimmed.strip_prefix('.'))
+            .map_or((2, trimmed.len()), |suffix| (1, suffix.len()));
+        best = best.max(score);
     }
     best
 }
@@ -852,7 +912,8 @@ fn host_specificity(patterns: &[String], host: &str) -> u8 {
 #[derive(Serialize)]
 struct Request<'a> {
     protocol: u32,
-    id: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<&'a str>,
     method: &'a str,
     params: Value,
 }
@@ -979,22 +1040,60 @@ fn is_plugin_file(path: &Path) -> bool {
     }
 }
 
+/// Describes candidates with a small worker pool, preserving discovery order.
+fn describe_all(paths: Vec<PathBuf>) -> Vec<(PathBuf, Result<Manifest, String>)> {
+    const WORKERS: usize = 4;
+    let workers = paths.len().min(WORKERS);
+    if workers <= 1 {
+        return paths
+            .into_iter()
+            .map(|path| {
+                let result = describe(&path);
+                (path, result)
+            })
+            .collect();
+    }
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let mut collected = Vec::with_capacity(paths.len());
+    thread::scope(|scope| {
+        let (sender, receiver) = mpsc::channel();
+        for _ in 0..workers {
+            let sender = sender.clone();
+            let next = &next;
+            let paths = &paths;
+            scope.spawn(move || loop {
+                let index = next.fetch_add(1, Ordering::Relaxed);
+                let Some(path) = paths.get(index) else {
+                    break;
+                };
+                if sender.send((index, describe(path))).is_err() {
+                    break;
+                }
+            });
+        }
+        drop(sender);
+        collected.extend(receiver);
+    });
+    collected.sort_by_key(|(index, _)| *index);
+    collected
+        .into_iter()
+        .map(|(index, result)| (paths[index].clone(), result))
+        .collect()
+}
+
 fn describe(path: &Path) -> Result<Manifest, String> {
     let mut command = Command::new(path);
     command.arg(DESCRIBE);
-    let captured = run_child(command, None, describe_timeout(), max_output())
-        .map_err(|error| format!("{}: {error}", path.display()))?;
+    let captured = run_child(command, None, describe_timeout(), max_output())?;
     if captured.timed_out {
         return Err(format!(
-            "{} did not answer {DESCRIBE} within {:?}",
-            path.display(),
+            "did not answer {DESCRIBE} within {:?}",
             describe_timeout()
         ));
     }
     if captured.overflow {
         return Err(format!(
-            "{} wrote more than {} bytes to {DESCRIBE}",
-            path.display(),
+            "wrote more than {} bytes to {DESCRIBE}",
             max_output()
         ));
     }
@@ -1002,16 +1101,14 @@ fn describe(path: &Path) -> Result<Manifest, String> {
         let stderr = String::from_utf8_lossy(&captured.stderr);
         let message = stderr.trim();
         return Err(if message.is_empty() {
-            format!("{} exited with {}", path.display(), captured.status)
+            format!("exited with {}", captured.status)
         } else {
             message.to_string()
         });
     }
     let manifest: Manifest = serde_json::from_slice(&captured.stdout)
-        .map_err(|error| format!("{} returned an invalid manifest: {error}", path.display()))?;
-    manifest
-        .validate()
-        .map_err(|error| format!("{}: {error}", path.display()))?;
+        .map_err(|error| format!("returned an invalid manifest: {error}"))?;
+    manifest.validate()?;
     Ok(manifest)
 }
 
@@ -1048,11 +1145,19 @@ fn run_child(
     let overflow = Arc::new(AtomicBool::new(false));
     let stdout = child.stdout.take().map(|pipe| {
         let overflow = Arc::clone(&overflow);
-        thread::spawn(move || read_limited(pipe, limit, &overflow))
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || {
+            let _ = sender.send(read_limited(pipe, limit, &overflow));
+        });
+        receiver
     });
     let stderr = child.stderr.take().map(|pipe| {
         let overflow = Arc::clone(&overflow);
-        thread::spawn(move || read_limited(pipe, limit, &overflow))
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || {
+            let _ = sender.send(read_limited(pipe, limit, &overflow));
+        });
+        receiver
     });
 
     let started = Instant::now();
@@ -1083,11 +1188,15 @@ fn run_child(
         }
     };
 
-    let (stdout, _) = stdout.map_or((Vec::new(), false), |handle| {
-        handle.join().unwrap_or((Vec::new(), false))
+    let (stdout, _) = stdout.map_or((Vec::new(), false), |receiver| {
+        receiver
+            .recv_timeout(READER_GRACE)
+            .unwrap_or((Vec::new(), false))
     });
-    let (stderr, _) = stderr.map_or((Vec::new(), false), |handle| {
-        handle.join().unwrap_or((Vec::new(), false))
+    let (stderr, _) = stderr.map_or((Vec::new(), false), |receiver| {
+        receiver
+            .recv_timeout(READER_GRACE)
+            .unwrap_or((Vec::new(), false))
     });
     Ok(Captured {
         status,
@@ -1279,7 +1388,9 @@ mod tests {
         fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
         let plugin = Extension {
             manifest: Manifest {
-                protocol: 2,
+                // Version 1, so the host must omit `id` and this script does
+                // not have to echo it.
+                protocol: 1,
                 id: "test".into(),
                 name: "Test".into(),
                 version: String::new(),
@@ -1335,5 +1446,163 @@ mod tests {
         assert_eq!(error.code, "timeout");
         assert!(error.retryable);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn test_extension(id: &str, capabilities: Vec<CapabilityDecl>) -> Extension {
+        Extension {
+            manifest: Manifest {
+                protocol: 2,
+                id: id.into(),
+                name: id.into(),
+                version: String::new(),
+                description: String::new(),
+                capabilities,
+                commands: Vec::new(),
+            },
+            path: PathBuf::from(format!("/nonexistent/dawngasm-plugin-{id}")),
+        }
+    }
+
+    fn capability(name: &str, methods: &[&str], hosts: &[&str], priority: i32) -> CapabilityDecl {
+        CapabilityDecl {
+            name: name.into(),
+            methods: methods.iter().map(|method| (*method).to_string()).collect(),
+            hosts: hosts.iter().map(|host| (*host).to_string()).collect(),
+            priority,
+            ..CapabilityDecl::default()
+        }
+    }
+
+    fn loaded(plugins: Vec<Extension>) -> Extensions {
+        Extensions {
+            plugins,
+            failures: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn request_ids_are_only_sent_to_protocol_two_plugins() {
+        let params = serde_json::json!({});
+        let version_one = serde_json::to_value(Request {
+            protocol: 1,
+            id: None,
+            method: METHOD_EXTRACT_RESOLVE,
+            params: params.clone(),
+        })
+        .unwrap();
+        assert!(version_one.get("id").is_none());
+
+        let version_two = serde_json::to_value(Request {
+            protocol: 2,
+            id: Some("1234-0"),
+            method: METHOD_EXTRACT_RESOLVE,
+            params,
+        })
+        .unwrap();
+        assert_eq!(version_two["id"], "1234-0");
+    }
+
+    #[test]
+    fn methods_narrow_capability_dispatch() {
+        let extensions = loaded(vec![
+            test_extension(
+                "tags-only",
+                vec![capability(CAP_FEED, &[METHOD_FEED_TAGS], &[], 0)],
+            ),
+            test_extension(
+                "fetch-only",
+                vec![capability(CAP_FEED, &[METHOD_FEED_FETCH], &[], 0)],
+            ),
+            test_extension("defaults", vec![capability(CAP_FEED, &[], &[], 0)]),
+        ]);
+
+        assert_eq!(
+            extensions
+                .find_for_method(CAP_FEED, METHOD_FEED_FETCH)
+                .map(|plugin| plugin.manifest.id.as_str()),
+            Some("fetch-only")
+        );
+        assert_eq!(
+            extensions
+                .find_for_method(CAP_FEED, METHOD_FEED_TAGS)
+                .map(|plugin| plugin.manifest.id.as_str()),
+            Some("tags-only")
+        );
+        assert!(extensions
+            .find_for_method(CAP_FEED, "feed.unknown")
+            .is_none());
+    }
+
+    #[test]
+    fn dispatch_orders_by_the_used_capability_priority() {
+        let extensions = loaded(vec![
+            test_extension("low", vec![capability(CAP_FILTER, &[], &[], 1)]),
+            test_extension("high", vec![capability(CAP_FILTER, &[], &[], 9)]),
+            test_extension("middle", vec![capability(CAP_FILTER, &[], &[], 5)]),
+        ]);
+        let ids: Vec<_> = extensions
+            .find_all_for_method(CAP_FILTER, METHOD_FILTER_APPLY)
+            .into_iter()
+            .map(|plugin| plugin.manifest.id.as_str())
+            .collect();
+        assert_eq!(ids, ["high", "middle", "low"]);
+    }
+
+    #[test]
+    fn extractors_rank_exact_and_longer_suffixes_first() {
+        let extensions = loaded(vec![
+            test_extension(
+                "broad",
+                vec![capability(CAP_EXTRACT, &[], &["*.example.com"], 100)],
+            ),
+            test_extension(
+                "narrow",
+                vec![capability(CAP_EXTRACT, &[], &["*.cdn.example.com"], 0)],
+            ),
+            test_extension(
+                "exact",
+                vec![capability(CAP_EXTRACT, &[], &["cdn.example.com"], 0)],
+            ),
+            test_extension(
+                "elsewhere",
+                vec![capability(CAP_EXTRACT, &[], &["other.test"], 0)],
+            ),
+        ]);
+        let ids: Vec<_> = extensions
+            .extractors_for_urls(&["https://cdn.example.com/track"])
+            .into_iter()
+            .map(|plugin| plugin.manifest.id.as_str())
+            .collect();
+        assert_eq!(ids, ["exact", "narrow", "broad"]);
+    }
+
+    #[test]
+    fn commands_respect_method_gating() {
+        let mut enabled = test_extension(
+            "enabled",
+            vec![capability(CAP_COMMAND, &[METHOD_COMMAND_INVOKE], &[], 0)],
+        );
+        enabled.manifest.commands = vec![CommandDecl {
+            id: "hello".into(),
+            title: String::new(),
+            description: String::new(),
+            key: None,
+        }];
+        let mut disabled = test_extension(
+            "disabled",
+            vec![capability(CAP_COMMAND, &["command.other"], &[], 0)],
+        );
+        disabled.manifest.commands = vec![CommandDecl {
+            id: "hidden".into(),
+            title: String::new(),
+            description: String::new(),
+            key: None,
+        }];
+        let commands = loaded(vec![disabled, enabled]).commands();
+        let ids: Vec<_> = commands
+            .iter()
+            .map(|command| command.command.id.as_str())
+            .collect();
+        assert_eq!(ids, ["hello"]);
     }
 }

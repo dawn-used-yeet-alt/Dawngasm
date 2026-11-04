@@ -71,7 +71,8 @@ are in [EXTENSIONS.md](EXTENSIONS.md). The short version:
 - `dawngasm-tui extensions list` shows what was found and what failed, and
   `dawngasm-tui extensions call ...` invokes a method by hand.
 - Every call has a timeout and an output cap, so a hung or flooding plugin is
-  killed rather than freezing the app.
+  killed rather than freezing the app. Clearance is the exception: it runs
+  synchronously because the system webview must own the UI thread.
 
 ## License
 

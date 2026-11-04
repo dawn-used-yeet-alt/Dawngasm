@@ -181,7 +181,17 @@ fn row_line(
     let host = audio_host::detect_host(post);
     let (host_style, label) = theme::host(host);
     let badge = format!("{label:<badge$}", badge = theme::HOST_BADGE_WIDTH);
-    let badges = annotations.map_or_else(String::new, |annotations| annotations.badges.join(" "));
+    let badges = annotations.map_or_else(String::new, |annotations| {
+        let mut rendered = annotations.badges.join(" ");
+        for tag in &annotations.tags {
+            if !rendered.is_empty() {
+                rendered.push(' ');
+            }
+            rendered.push('#');
+            rendered.push_str(tag);
+        }
+        rendered
+    });
     let badges = truncate(&badges, 16);
     let extra_cols = if badges.is_empty() {
         0

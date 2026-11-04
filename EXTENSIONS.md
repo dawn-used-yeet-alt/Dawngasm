@@ -59,13 +59,18 @@ Fields:
 - `id`: stable plugin id, used in errors and `extensions call`.
 - `name`, `version`, `description`: display metadata.
 - `capabilities`: objects, or the version 1 shorthand `["extract"]`.
-- `commands`: commands exposed through the `:` palette.
+- `commands`: commands exposed through the `:` palette. Each has an `id`, a
+  `title`, a `description`, and an optional `key`. The host does not bind
+  `key` yet; it is reserved so a manifest can suggest a future shortcut.
+  Commands run from the palette, not from manifest keybindings.
 
 A capability object accepts:
 
 - `name`: `clearance`, `extract`, `feed`, `post.filter`, `post.enrich` or
   `command`.
-- `methods`: methods it answers. Empty uses the capability's defaults.
+- `methods`: methods it answers. Empty uses the capability's defaults. A
+  non-empty list narrows dispatch: a `feed` plugin declaring only
+  `["feed.tags"]` is never asked for `feed.fetch`.
 - `hosts`: for `extract`, exact domains (`example.com`) or subdomain patterns
   (`.example.com`, `*.example.com`). Empty means "any host".
 - `priority`: higher runs first when several plugins advertise the same
@@ -141,6 +146,11 @@ Result:
 The bundled `dawngasm-plugin-clearance` implements this with the system
 webview.
 
+Clearance is the one blocking capability: the host runs it synchronously on the
+UI thread because the system webview must own the window and event loop,
+especially on macOS. A hung clearance plugin can therefore freeze the TUI until
+its timeout (330s by default); every other capability runs off the UI thread.
+
 ### `feed`
 
 Methods: `feed.fetch`, `feed.tags`
@@ -199,8 +209,9 @@ Result:
 }
 ```
 
-Badges are rendered next to the host badge. Every `post.enrich` plugin runs
-in priority order and their annotations merge. The hook is best-effort.
+Badges and `#tags` are rendered next to the host badge. Every `post.enrich`
+plugin runs in priority order and their annotations merge. The hook is
+best-effort.
 
 ### `command`
 
@@ -274,15 +285,16 @@ JSON
     ;;
   run)
     request=$(cat)
+    id=$(printf '%s' "$request" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
     case "$request" in
       *'"method":"extract.resolve"'*)
-        printf '%s\n' '{"protocol":2,"ok":true,"result":{"url":"https://cdn.example/track.m4a"}}'
+        printf '{"protocol":2,"id":"%s","ok":true,"result":{"url":"https://cdn.example/track.m4a"}}\n' "$id"
         ;;
       *'"method":"command.invoke"'*)
-        printf '%s\n' '{"protocol":2,"ok":true,"result":{"message":"Hello from example."}}'
+        printf '{"protocol":2,"id":"%s","ok":true,"result":{"message":"Hello from example."}}\n' "$id"
         ;;
       *)
-        printf '%s\n' '{"protocol":2,"ok":false,"error":{"code":"unsupported","message":"unknown method"}}'
+        printf '{"protocol":2,"id":"%s","ok":false,"error":{"code":"unsupported","message":"unknown method"}}\n' "$id"
         ;;
     esac
     ;;

@@ -131,7 +131,9 @@ impl Extractors {
                 .copied()
                 .filter(|plugin| plugin.overrides_builtin(CAP_EXTRACT))
                 .collect();
-            if let Some(media) = self.try_plugins(&overrides, post)? {
+            // An override that crashes or times out must not hide the working
+            // built-in extractor, so only a successful result short-circuits.
+            if let Ok(Some(media)) = self.try_plugins(&overrides, post) {
                 return Ok(media);
             }
             return self.resolve_host(post, host);
@@ -160,10 +162,13 @@ impl Extractors {
     /// Asks each `extract` extension in turn to turn the post into a plain
     /// HTTP media URL. A plugin can decline with `{"handled": false}` (or an
     /// `unsupported`/`not_found` error), which lets several plugins share the
-    /// capability.
+    /// capability. A plugin that crashes or returns a malformed result is
+    /// skipped so a later candidate still gets a chance; the first such error
+    /// is reported only if nothing handles the post.
     ///
     /// Hotaudio stays built in because it needs a decrypting stream, not a URL.
     fn try_plugins(&self, plugins: &[&Extension], post: &Post) -> Result<Option<ResolvedMedia>> {
+        let mut first_error: Option<String> = None;
         for plugin in plugins {
             let result = plugin.call(
                 METHOD_EXTRACT_RESOLVE,
@@ -179,32 +184,46 @@ impl Extractors {
                     "created_utc": post.created_utc,
                 }),
             );
-            match result {
-                Ok(value) => {
-                    if extensions::is_unhandled(&value) {
-                        continue;
-                    }
-                    let media: PluginMedia = serde_json::from_value(value).map_err(|error| {
-                        err(format!(
-                            "{} returned an invalid result: {error}",
-                            plugin.manifest.id
-                        ))
-                    })?;
-                    if media.url.trim().is_empty() {
-                        return Err(err(format!(
-                            "{} returned an empty media URL",
-                            plugin.manifest.id
-                        )));
-                    }
-                    let mut resolved = self.http(media.url, media.headers.into_iter().collect())?;
+            let value = match result {
+                Ok(value) => value,
+                Err(error) if error.is_unhandled() => continue,
+                Err(error) => {
+                    first_error.get_or_insert_with(|| error.to_string());
+                    continue;
+                }
+            };
+            if extensions::is_unhandled(&value) {
+                continue;
+            }
+            let media: PluginMedia = match serde_json::from_value(value) {
+                Ok(media) => media,
+                Err(error) => {
+                    first_error.get_or_insert_with(|| {
+                        format!("{} returned an invalid result: {error}", plugin.manifest.id)
+                    });
+                    continue;
+                }
+            };
+            if media.url.trim().is_empty() {
+                first_error.get_or_insert_with(|| {
+                    format!("{} returned an empty media URL", plugin.manifest.id)
+                });
+                continue;
+            }
+            match self.http(media.url, media.headers.into_iter().collect()) {
+                Ok(mut resolved) => {
                     resolved.duration_hint_ms = media.duration_ms;
                     return Ok(Some(resolved));
                 }
-                Err(error) if error.is_unhandled() => {}
-                Err(error) => return Err(err(error.to_string())),
+                Err(error) => {
+                    first_error.get_or_insert_with(|| error.to_string());
+                }
             }
         }
-        Ok(None)
+        match first_error {
+            Some(error) => Err(err(error)),
+            None => Ok(None),
+        }
     }
 
     fn http(&self, url: String, headers: Vec<(String, String)>) -> Result<ResolvedMedia> {

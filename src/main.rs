@@ -48,13 +48,28 @@ fn extensions_list(arguments: &[String]) -> anyhow::Result<()> {
                 })
             })
             .collect();
+        let plugins: Vec<_> = extensions
+            .plugins()
+            .iter()
+            .map(|plugin| {
+                let mut value =
+                    serde_json::to_value(&plugin.manifest).unwrap_or(serde_json::Value::Null);
+                if let serde_json::Value::Object(fields) = &mut value {
+                    fields.insert(
+                        "path".to_string(),
+                        serde_json::json!(plugin.path.to_string_lossy()),
+                    );
+                }
+                value
+            })
+            .collect();
         let search_dirs: Vec<_> = Extensions::search_dirs()
             .into_iter()
             .map(|dir| dir.to_string_lossy().into_owned())
             .collect();
         let value = serde_json::json!({
             "search_dirs": search_dirs,
-            "plugins": extensions.manifests(),
+            "plugins": plugins,
             "failures": failures,
         });
         println!("{}", serde_json::to_string_pretty(&value)?);

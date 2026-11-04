@@ -106,6 +106,25 @@ pub(crate) struct CommandMatch {
     pub command: CommandDecl,
 }
 
+/// The command Enter should run: an explicit arrow selection wins, then an
+/// exact id typed by the user. A partial query or empty palette never falls
+/// through to "whatever matched first".
+fn command_for_enter(
+    matches: &[CommandMatch],
+    selected: Option<usize>,
+    typed: &str,
+) -> Option<CommandMatch> {
+    selected
+        .and_then(|index| matches.get(index))
+        .cloned()
+        .or_else(|| {
+            matches
+                .iter()
+                .find(|candidate| candidate.command.id == typed)
+                .cloned()
+        })
+}
+
 /// Results from the feed worker.
 enum Event {
     FeedLoaded {
@@ -584,24 +603,21 @@ impl App {
             Enter => {
                 let typed = self.input.as_deref().unwrap_or_default().trim().to_string();
                 let matches = self.command_matches();
-                // An explicit arrow selection wins, so two plugins exposing
-                // the same command id are still individually reachable.
-                let command = self
-                    .command_selected
-                    .and_then(|index| matches.get(index))
-                    .cloned()
-                    .or_else(|| {
-                        matches
-                            .iter()
-                            .find(|candidate| candidate.command.id == typed)
-                            .cloned()
-                    })
-                    .or_else(|| matches.first().cloned());
+                let has_matches = !matches.is_empty();
+                // Only an explicit arrow selection or an exact id may run
+                // something: Enter on an empty or partial query must not fire
+                // whichever command happens to sort first.
+                let command = command_for_enter(&matches, self.command_selected, &typed);
                 self.end_input();
                 if let Some(command) = command {
                     self.run_command_match(command);
-                } else if typed.trim().is_empty() {
-                    self.set_toast("No extension commands are installed.", false);
+                } else if typed.is_empty() {
+                    self.set_toast("Select a command with ↑/↓ and press Enter.", false);
+                } else if has_matches {
+                    self.set_toast(
+                        "Select a command with ↑/↓ or type its exact id, then press Enter.",
+                        false,
+                    );
                 } else {
                     self.set_toast(
                         format!("No extension command matches “{}”.", typed.trim()),
@@ -610,12 +626,18 @@ impl App {
                 }
             }
             Tab => {
+                let index = self.command_selected.unwrap_or(0);
                 let id = self
                     .command_matches()
-                    .get(self.command_selected.unwrap_or(0))
+                    .get(index)
                     .map(|candidate| candidate.command.id.clone());
-                if let (Some(id), Some(buffer)) = (id, self.input.as_mut()) {
-                    buffer.clone_from(&id);
+                if let Some(id) = id {
+                    if let Some(buffer) = self.input.as_mut() {
+                        buffer.clone_from(&id);
+                    }
+                    // Tab highlights the row it completed, so Enter runs the
+                    // same command the user just saw filled in.
+                    self.command_selected = Some(index);
                 }
             }
             Up => self.move_command(-1),
@@ -680,22 +702,6 @@ impl App {
 
     pub(crate) const fn command_selected(&self) -> Option<usize> {
         self.command_selected
-    }
-
-    fn run_command(&mut self, value: &str) {
-        let matches = self.command_matches();
-        let selected = self.command_selected.unwrap_or(0);
-        let command = matches
-            .iter()
-            .find(|candidate| candidate.command.id == value)
-            .cloned()
-            .or_else(|| matches.get(selected).cloned())
-            .or_else(|| matches.first().cloned());
-        let Some(command) = command else {
-            self.set_toast("No extension commands are installed.", false);
-            return;
-        };
-        self.run_command_match(command);
     }
 
     fn run_command_match(&mut self, command: CommandMatch) {
@@ -770,18 +776,13 @@ impl App {
 
     fn submit_input(&mut self) {
         let value = self.input.take().unwrap_or_default().trim().to_string();
-        if self.input_mode == InputMode::Command {
-            // Close the palette before running, so the next key press is not
-            // routed to the command handler.
-            self.end_input();
-            self.run_command(&value);
-            return;
-        }
         match self.input_mode {
             InputMode::Search => self.query = value,
             InputMode::Tags => self.tags = value,
             InputMode::BlockedTags => self.blocked_tags = value,
-            InputMode::Command => {}
+            // Command mode is handled entirely by `on_command_key`, which
+            // intercepts keys before `submit_input` is reached.
+            InputMode::Command => return,
         }
         self.clear_suggestions();
         self.request_page(0);
@@ -1514,35 +1515,42 @@ fn load_feed(
     query: &str,
     page: usize,
 ) -> Result<LoadedFeed, String> {
-    let plugin_feed = extensions.find(CAP_FEED).and_then(|plugin| {
-        plugin
-            .call(
-                METHOD_FEED_FETCH,
-                serde_json::json!({
-                    "sort": sort,
-                    "period": period,
-                    "tags": tags,
-                    "exclude_tags": exclude_tags,
-                    "query": query,
-                    "page": page,
-                }),
-            )
-            .ok()
-    });
-    let (mut posts, has_more) = match plugin_feed.filter(|value| !extensions::is_unhandled(value)) {
-        Some(value) => {
-            let feed: FeedPage = serde_json::from_value(value)
-                .map_err(|error| format!("feed extension returned an invalid page: {error}"))?;
-            (feed.posts, feed.has_more)
-        }
-        None => client
+    let plugin_feed = extensions
+        .find_for_method(CAP_FEED, METHOD_FEED_FETCH)
+        .and_then(|plugin| {
+            plugin
+                .call(
+                    METHOD_FEED_FETCH,
+                    serde_json::json!({
+                        "sort": sort,
+                        "period": period,
+                        "tags": tags,
+                        "exclude_tags": exclude_tags,
+                        "query": query,
+                        "page": page,
+                    }),
+                )
+                .ok()
+        })
+        .filter(|value| !extensions::is_unhandled(value));
+    let mut fetch_builtin = || {
+        client
             .fetch_posts(sort, period, tags, exclude_tags, query, page)
-            .map_err(|error| error.to_string())?,
+            .map_err(|error| error.to_string())
+    };
+    let (mut posts, has_more) = match plugin_feed {
+        // A call-level failure already falls back; a malformed `ok:true`
+        // result should too, so one broken plugin cannot take the feed down.
+        Some(value) => match serde_json::from_value::<FeedPage>(value) {
+            Ok(feed) => (feed.posts, feed.has_more),
+            Err(_) => fetch_builtin()?,
+        },
+        None => fetch_builtin()?,
     };
 
     // Filters and enrichers chain in priority order. Each filter sees the
     // posts the previous one kept, and annotations from every enricher merge.
-    for plugin in extensions.find_all(CAP_FILTER) {
+    for plugin in extensions.find_all_for_method(CAP_FILTER, METHOD_FILTER_APPLY) {
         let Ok(value) = plugin.call(
             METHOD_FILTER_APPLY,
             serde_json::json!({
@@ -1569,7 +1577,7 @@ fn load_feed(
     }
 
     let mut annotations: BTreeMap<String, PostAnnotations> = BTreeMap::new();
-    for plugin in extensions.find_all(CAP_ENRICH) {
+    for plugin in extensions.find_all_for_method(CAP_ENRICH, METHOD_ENRICH_APPLY) {
         let Ok(value) = plugin.call(METHOD_ENRICH_APPLY, serde_json::json!({"posts": &posts}))
         else {
             continue;
@@ -1605,7 +1613,7 @@ fn suggest_tags(
     prefix: &str,
 ) -> Vec<TagSuggestion> {
     extensions
-        .find(CAP_FEED)
+        .find_for_method(CAP_FEED, METHOD_FEED_TAGS)
         .and_then(|plugin| {
             plugin
                 .call(METHOD_FEED_TAGS, serde_json::json!({"prefix": prefix}))
@@ -1657,6 +1665,46 @@ fn choose_tag(value: &mut String, tag: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn enter_only_runs_a_selected_or_exactly_typed_command() {
+        let extension = Extension {
+            manifest: crate::services::extensions::Manifest {
+                protocol: 2,
+                id: "test".into(),
+                name: String::new(),
+                version: String::new(),
+                description: String::new(),
+                capabilities: Vec::new(),
+                commands: Vec::new(),
+            },
+            path: std::path::PathBuf::from("/nonexistent/dawngasm-plugin-test"),
+        };
+        let command = |id: &str| CommandMatch {
+            extension: extension.clone(),
+            command: CommandDecl {
+                id: id.into(),
+                title: String::new(),
+                description: String::new(),
+                key: None,
+            },
+        };
+        let matches = vec![command("clear"), command("clear-history")];
+
+        assert!(command_for_enter(&matches, None, "").is_none());
+        assert!(command_for_enter(&matches, None, "cle").is_none());
+        assert_eq!(
+            command_for_enter(&matches, None, "clear")
+                .unwrap()
+                .command
+                .id,
+            "clear"
+        );
+        assert_eq!(
+            command_for_enter(&matches, Some(1), "").unwrap().command.id,
+            "clear-history"
+        );
+    }
 
     #[test]
     fn highlight_navigation_wraps_in_both_directions() {
