@@ -656,7 +656,7 @@ impl Extensions {
         // read from this capability rather than the whole manifest, so one
         // high-priority capability does not reorder the others.
         found.sort_by(|a, b| {
-            capability_priority(*b, capability).cmp(&capability_priority(*a, capability))
+            capability_priority(b, capability).cmp(&capability_priority(a, capability))
         });
         found
     }
@@ -940,7 +940,7 @@ fn candidates() -> Vec<PathBuf> {
             continue;
         };
         let mut entries: Vec<_> = entries.filter_map(Result::ok).collect();
-        entries.sort_by_key(|entry| entry.file_name());
+        entries.sort_by_key(std::fs::DirEntry::file_name);
         for entry in entries {
             let path = entry.path();
             if !is_plugin_file(&path) {

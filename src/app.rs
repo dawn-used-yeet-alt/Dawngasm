@@ -1497,6 +1497,9 @@ fn feed_worker(commands: &Receiver<Command>, events: &Sender<Event>) {
     }
 }
 
+/// A loaded page plus the annotations contributed by `post.enrich` plugins.
+type LoadedFeed = (Vec<Post>, bool, BTreeMap<String, PostAnnotations>);
+
 /// Loads one page through a `feed` extension when present, then applies the
 /// filter and enrich hooks. Hooks are best-effort: a broken plugin leaves the
 /// page usable rather than turning a feed load into an error.
@@ -1510,7 +1513,7 @@ fn load_feed(
     exclude_tags: &str,
     query: &str,
     page: usize,
-) -> Result<(Vec<Post>, bool, BTreeMap<String, PostAnnotations>), String> {
+) -> Result<LoadedFeed, String> {
     let plugin_feed = extensions.find(CAP_FEED).and_then(|plugin| {
         plugin
             .call(

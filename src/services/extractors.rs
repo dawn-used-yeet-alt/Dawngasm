@@ -200,7 +200,7 @@ impl Extractors {
                     resolved.duration_hint_ms = media.duration_ms;
                     return Ok(Some(resolved));
                 }
-                Err(error) if error.is_unhandled() => continue,
+                Err(error) if error.is_unhandled() => {}
                 Err(error) => return Err(err(error.to_string())),
             }
         }
