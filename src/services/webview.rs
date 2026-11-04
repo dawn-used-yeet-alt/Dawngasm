@@ -2,7 +2,7 @@
 //!
 //! The webview itself ships as `dawngasm-plugin-clearance`, a separate
 //! executable. Keeping it out of the TUI means the player never links
-//! WebKitGTK, WKWebView or WebView2, so it starts on machines without a
+//! `WebKitGTK`, `WKWebView` or `WebView2`, so it starts on machines without a
 //! webview runtime. Pressing `C` is the only action that needs the plugin.
 //!
 //! The plugin answers `clearance.capture` with the `cf_clearance` cookie and

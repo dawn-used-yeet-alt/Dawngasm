@@ -260,7 +260,8 @@ fn is_plugin_file(path: &Path) -> bool {
     }
     #[cfg(windows)]
     {
-        name.ends_with(".exe")
+        path.extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("exe"))
     }
     #[cfg(unix)]
     {

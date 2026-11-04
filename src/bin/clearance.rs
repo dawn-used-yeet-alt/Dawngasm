@@ -2,8 +2,8 @@
 //!
 //! The TUI invokes this as an extension. It prints a manifest for `--describe`,
 //! or reads one JSON request from stdin and answers on stdout. All the webview
-//! code lives here so the TUI itself never links WebKitGTK, WKWebView or
-//! WebView2.
+//! code lives here so the TUI itself never links `WebKitGTK`, `WKWebView` or
+//! `WebView2`.
 
 use std::io;
 use std::sync::{Arc, Mutex};
