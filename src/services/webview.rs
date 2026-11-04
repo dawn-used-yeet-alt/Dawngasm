@@ -1,10 +1,10 @@
 //! The hotaudio Cloudflare clearance window.
 //!
-//! Cloudflare's `cf_clearance` cookie is HttpOnly, so a terminal app cannot read
-//! it out of the user's browser. The one lightweight way to obtain it is to let
-//! the platform's own webview solve the challenge, then read the cookie back
-//! through the webview API. `wry` uses WebKitGTK on Linux, WKWebView on macOS
-//! and WebView2 on Windows, so nothing is bundled.
+//! Cloudflare's `cf_clearance` cookie is `HttpOnly`, so a terminal app cannot
+//! read it out of the user's browser. The one lightweight way to obtain it is
+//! to let the platform's own webview solve the challenge, then read the cookie
+//! back through the webview API. `wry` uses `WebKitGTK` on Linux, `WKWebView`
+//! on macOS and `WebView2` on Windows, so nothing is bundled.
 //!
 //! The webview runs in a short-lived child process (`--cloudflare-clearance`).
 //! That keeps a GUI event loop out of the TUI's main thread, makes a second
@@ -13,7 +13,6 @@
 
 use std::path::PathBuf;
 
-use crate::services::hotaudio_auth::HotaudioClearance;
 use crate::services::storage::Storage;
 
 /// The hidden argument that runs the webview instead of the TUI.
@@ -218,6 +217,6 @@ mod platform {
 use platform::capture_clearance;
 
 #[cfg(not(feature = "webview"))]
-fn capture_clearance() -> Result<HotaudioClearance, String> {
+fn capture_clearance() -> Result<crate::services::hotaudio_auth::HotaudioClearance, String> {
     Err("this build was compiled without the `webview` feature".to_string())
 }
