@@ -1,222 +1,110 @@
-//! The hotaudio Cloudflare clearance window.
+//! The hotaudio Cloudflare clearance extension.
 //!
-//! Cloudflare's `cf_clearance` cookie is `HttpOnly`, so a terminal app cannot
-//! read it out of the user's browser. The one lightweight way to obtain it is
-//! to let the platform's own webview solve the challenge, then read the cookie
-//! back through the webview API. `wry` uses `WebKitGTK` on Linux, `WKWebView`
-//! on macOS and `WebView2` on Windows, so nothing is bundled.
+//! The webview itself ships as `dawngasm-plugin-clearance`, a separate
+//! executable. Keeping it out of the TUI means the player never links
+//! `WebKitGTK`, `WKWebView` or `WebView2`, so it starts on machines without a
+//! webview runtime. Pressing `C` is the only action that needs the plugin.
 //!
-//! The webview runs in a short-lived child process (`--cloudflare-clearance`).
-//! That keeps a GUI event loop out of the TUI's main thread, makes a second
-//! capture a fresh process instead of a reused event loop, and lets the parent
-//! capture the child's stderr so GTK warnings never scribble over the terminal.
+//! The plugin answers `clearance.capture` with the `cf_clearance` cookie and
+//! the exact user agent that earned it; this module saves the pair.
 
 use std::path::PathBuf;
 
+use serde::Deserialize;
+use serde_json::json;
+
+use crate::services::extensions::{Extensions, CAP_CLEARANCE, METHOD_CLEARANCE_CAPTURE};
+use crate::services::hotaudio_auth::HotaudioClearance;
 use crate::services::storage::Storage;
 
-/// The hidden argument that runs the webview instead of the TUI.
-pub const CLEARANCE_FLAG: &str = "--cloudflare-clearance";
+#[derive(Deserialize)]
+struct Captured {
+    cookie: String,
+    #[serde(default)]
+    user_agent: String,
+}
 
-/// Opens the webview, waits for `cf_clearance`, and saves the cookie/UA pair.
+/// Opens the clearance plugin, waits for `cf_clearance`, and saves the pair.
 ///
 /// # Errors
 ///
-/// Returns an error if the window cannot be opened, the user closes it without
-/// clearing the challenge, or the clearance cannot be saved.
+/// Returns an error when no clearance extension is installed, the plugin fails,
+/// or the clearance cannot be saved.
 pub fn capture_and_save() -> Result<PathBuf, String> {
-    let clearance = capture_clearance()?;
+    let extensions = Extensions::global();
+    let plugin = extensions.find(CAP_CLEARANCE).ok_or_else(|| {
+        extensions.failure(CAP_CLEARANCE).map_or_else(
+            || {
+                "no Cloudflare clearance extension is installed; put `dawngasm-plugin-clearance` in the plugins directory next to the app".to_string()
+            },
+            |failure| runtime_hint(&failure.error),
+        )
+    })?;
+    let result = plugin.call(METHOD_CLEARANCE_CAPTURE, json!({}))?;
+    let captured: Captured = serde_json::from_value(result)
+        .map_err(|error| format!("the clearance extension returned an invalid result: {error}"))?;
+    if captured.cookie.trim().is_empty() {
+        return Err("the clearance extension returned an empty cookie".to_string());
+    }
     let dir = Storage::default_dir()
         .map_err(|error| format!("could not find the data directory: {error}"))?;
-    clearance
+    HotaudioClearance::new(captured.cookie, captured.user_agent)
         .save(&dir)
         .map_err(|error| format!("could not save the clearance: {error}"))
 }
 
-/// Runs the clearance window in a child process and reports its result.
+/// Runs the clearance extension and discards the saved path.
 ///
 /// # Errors
 ///
-/// Returns the child's stderr when it fails, or a message when the child could
-/// not be started.
+/// See [`capture_and_save`].
 pub fn run_clearance_process() -> Result<(), String> {
-    let exe = std::env::current_exe()
-        .map_err(|error| format!("could not find the executable: {error}"))?;
-    let output = std::process::Command::new(exe)
-        .arg(CLEARANCE_FLAG)
-        .output()
-        .map_err(|error| format!("could not start the clearance window: {error}"))?;
-    if output.status.success() {
-        return Ok(());
-    }
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let message = stderr.trim();
-    let status = output.status;
-    Err(if message.is_empty() {
-        format!("the clearance window exited with {status}")
-    } else {
-        message.to_string()
-    })
+    capture_and_save()?;
+    Ok(())
 }
 
-#[cfg(feature = "webview")]
-mod platform {
-    use std::sync::{Arc, Mutex};
-    use std::time::{Duration, Instant};
-
-    use tao::dpi::LogicalSize;
-    use tao::event::{Event, WindowEvent};
-    use tao::event_loop::{ControlFlow, EventLoop};
-    use tao::platform::run_return::EventLoopExtRunReturn as _;
-    use tao::window::WindowBuilder;
-    use wry::{WebView, WebViewBuilder};
-
-    use crate::services::hotaudio_auth::HotaudioClearance;
-
-    /// Where the challenge is passed. Any hotaudio page sets the same
-    /// domain-wide clearance; the home page keeps the window useful even when
-    /// the user has not selected a track.
-    const HOTAUDIO_URL: &str = "https://hotaudio.net/";
-    const WINDOW_TITLE: &str = "Dawngasm — Cloudflare clearance";
-    /// How often the webview cookie jar is checked while the challenge is up.
-    const POLL_INTERVAL: Duration = Duration::from_millis(400);
-    /// Give up after this long; the clearance itself is short lived anyway.
-    const TIMEOUT: Duration = Duration::from_secs(300);
-
-    /// A desktop-browser user agent, set explicitly so the cookie is bound to a
-    /// value this process knows. The actual `navigator.userAgent` is read back
-    /// when the engine reports it, which covers WebView2 versions that ignore
-    /// the override.
-    #[cfg(target_os = "windows")]
-    const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0";
-    #[cfg(target_os = "macos")]
-    const USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Safari/605.1.15";
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-    const USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
-
-    pub(super) fn capture_clearance() -> Result<HotaudioClearance, String> {
-        let mut event_loop = EventLoop::new();
-        let window = WindowBuilder::new()
-            .with_title(WINDOW_TITLE)
-            .with_inner_size(LogicalSize::new(960.0, 720.0))
-            .build(&event_loop)
-            .map_err(|error| format!("could not open the clearance window: {error}"))?;
-
-        let builder = WebViewBuilder::new()
-            .with_user_agent(USER_AGENT)
-            .with_devtools(true);
-        #[cfg(any(target_os = "windows", target_os = "macos"))]
-        let webview = builder
-            .build(&window)
-            .map_err(|error| format!("could not create the clearance webview: {error}"))?;
-        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-        let webview = {
-            use tao::platform::unix::WindowExtUnix as _;
-            use wry::WebViewBuilderExtUnix as _;
-            let vbox = window
-                .default_vbox()
-                .ok_or_else(|| "the clearance window has no GTK container".to_string())?;
-            builder
-                .build_gtk(vbox)
-                .map_err(|error| format!("could not create the clearance webview: {error}"))?
-        };
-
-        // Drop any stale clearance first: an old cookie would otherwise look
-        // like a successful challenge the moment the window opens.
-        clear_hotaudio_cookies(&webview);
-
-        let actual_user_agent = Arc::new(Mutex::new(None));
-        capture_user_agent(&webview, Arc::clone(&actual_user_agent));
-        webview
-            .load_url(HOTAUDIO_URL)
-            .map_err(|error| format!("could not load {HOTAUDIO_URL}: {error}"))?;
-
-        let started = Instant::now();
-        let mut captured = None;
-        let exit_code = event_loop.run_return(|event, _, control_flow| {
-            *control_flow = ControlFlow::WaitUntil(Instant::now() + POLL_INTERVAL);
-            match event {
-                Event::WindowEvent {
-                    event: WindowEvent::CloseRequested,
-                    ..
-                } => *control_flow = ControlFlow::Exit,
-                Event::MainEventsCleared => {
-                    if started.elapsed() >= TIMEOUT {
-                        *control_flow = ControlFlow::Exit;
-                        return;
-                    }
-                    if let Some(clearance) = clearance_from(&webview, &actual_user_agent) {
-                        captured = Some(clearance);
-                        *control_flow = ControlFlow::Exit;
-                    }
-                }
-                _ => {}
-            }
-        });
-        if exit_code != 0 && captured.is_none() {
-            return Err("the clearance window lost its display connection".to_string());
-        }
-        captured
-            .ok_or_else(|| "the clearance window closed without a cf_clearance cookie".to_string())
+/// Turns a dynamic-loader error into an install hint. The plugin is present but
+/// its webview runtime is not.
+///
+/// The toast is a single line, so the package names come first; the loader
+/// error is only useful when the hint does not apply.
+fn runtime_hint(message: &str) -> String {
+    if !message.contains("libwebkit2gtk-4.1") && !message.contains("libjavascriptcoregtk-4.1") {
+        return message.to_string();
     }
-
-    fn clear_hotaudio_cookies(webview: &WebView) {
-        let Ok(cookies) = webview.cookies_for_url(HOTAUDIO_URL) else {
-            return;
-        };
-        for cookie in &cookies {
-            if is_hotaudio_cookie(cookie.domain()) {
-                let _ = webview.delete_cookie(cookie);
-            }
-        }
-    }
-
-    fn capture_user_agent(webview: &WebView, sink: Arc<Mutex<Option<String>>>) {
-        let _ = webview.evaluate_script_with_callback("navigator.userAgent", move |value| {
-            let user_agent = serde_json::from_str::<String>(&value).unwrap_or(value);
-            if let Ok(mut slot) = sink.lock() {
-                *slot = Some(user_agent);
-            }
-        });
-    }
-
-    fn clearance_from(
-        webview: &WebView,
-        user_agent: &Arc<Mutex<Option<String>>>,
-    ) -> Option<HotaudioClearance> {
-        let cookies = webview.cookies_for_url(HOTAUDIO_URL).ok()?;
-        if !cookies.iter().any(|cookie| cookie.name() == "cf_clearance") {
-            return None;
-        }
-        let cookie = cookies
-            .iter()
-            .filter(|cookie| is_hotaudio_cookie(cookie.domain()))
-            .map(|cookie| format!("{}={}", cookie.name(), cookie.value()))
-            .collect::<Vec<_>>()
-            .join("; ");
-        if cookie.is_empty() {
-            return None;
-        }
-        let user_agent = user_agent
-            .lock()
-            .ok()
-            .and_then(|slot| slot.clone())
-            .unwrap_or_else(|| USER_AGENT.to_string());
-        Some(HotaudioClearance::new(cookie, user_agent))
-    }
-
-    fn is_hotaudio_cookie(domain: Option<&str>) -> bool {
-        domain.is_none_or(|domain| {
-            let domain = domain.trim_start_matches('.').to_ascii_lowercase();
-            domain == "hotaudio.net" || domain.ends_with(".hotaudio.net")
-        })
-    }
+    #[cfg(target_os = "linux")]
+    let hint = "WebKitGTK runtime missing: install webkit2gtk-4.1 (Arch), libwebkit2gtk-4.1-0 (Debian), webkit2gtk4.1 (Fedora)";
+    #[cfg(not(target_os = "linux"))]
+    let hint = "The system webview runtime is missing.";
+    hint.to_string()
 }
 
-#[cfg(feature = "webview")]
-use platform::capture_clearance;
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-#[cfg(not(feature = "webview"))]
-fn capture_clearance() -> Result<crate::services::hotaudio_auth::HotaudioClearance, String> {
-    Err("this build was compiled without the `webview` feature".to_string())
+    #[test]
+    fn parses_a_captured_pair() {
+        let captured: Captured =
+            serde_json::from_str(r#"{"cookie":"cf_clearance=x","user_agent":"Mozilla/5.0"}"#)
+                .unwrap();
+        assert_eq!(captured.cookie, "cf_clearance=x");
+        assert_eq!(captured.user_agent, "Mozilla/5.0");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_missing_webkit_library_gets_a_package_hint() {
+        let message = runtime_hint(
+            "./dawngasm-plugin-clearance: error while loading shared libraries: libwebkit2gtk-4.1.so.0: cannot open shared object file",
+        );
+        // The toast truncates, so the package hint must lead.
+        assert!(message.starts_with("WebKitGTK runtime missing"));
+        assert!(message.contains("webkit2gtk-4.1"));
+    }
+
+    #[test]
+    fn unrelated_failures_are_passed_through() {
+        assert_eq!(runtime_hint("the window closed"), "the window closed");
+    }
 }

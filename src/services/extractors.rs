@@ -11,10 +11,14 @@
 //! - **hotaudio** serves nothing plain: its container is decrypted on demand
 //!   (see [`hotaudio`](super::audio::hotaudio)), which is why it returns a
 //!   different kind of source entirely.
+//! - **unknown hosts** fall back to an `extract` extension: a separate process
+//!   that returns a plain ranged media URL, so a new site can be added without
+//!   rebuilding the TUI.
 //!
 //! Parsing lives in the pure `parse_*` functions so it can be unit tested
 //! without a network.
 
+use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
 use regex::Regex;
@@ -26,6 +30,7 @@ use crate::models::post::Post;
 
 use super::audio::hotaudio::HotaudioMediaSource;
 use super::audio::http_source::HttpMediaSource;
+use super::extensions::{self, CAP_EXTRACT, METHOD_EXTRACT_RESOLVE};
 use super::hotaudio_auth::HotaudioClearance;
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -69,6 +74,16 @@ pub struct ResolvedMedia {
     pub duration_hint_ms: Option<i64>,
 }
 
+/// The `extract.resolve` result an extension returns.
+#[derive(serde::Deserialize)]
+struct PluginMedia {
+    url: String,
+    #[serde(default)]
+    headers: BTreeMap<String, String>,
+    #[serde(default)]
+    duration_ms: Option<i64>,
+}
+
 pub struct Extractors {
     /// One agent with a shared cookie jar: audiochan's play-intent cookie has
     /// to ride the ranged stream requests, and clones share the jar.
@@ -89,19 +104,65 @@ impl Extractors {
     }
 
     /// Resolves `post` to a playable byte source, choosing the extractor by
-    /// host. This blocks on network I/O, so it runs on the decode worker.
+    /// host. Unknown hosts fall back to an `extract` extension, so a new site
+    /// can be added without rebuilding the TUI.
+    ///
+    /// This blocks on network I/O, so it runs on the decode worker.
     ///
     /// # Errors
     ///
-    /// Returns an error if the host is unknown or resolving the stream fails.
+    /// Returns an error if no extractor handles the post or resolving the
+    /// stream fails.
     pub fn resolve_media(&self, post: &Post) -> Result<ResolvedMedia> {
         match audio_host::detect_host(post) {
+            AudioHost::Unknown => self.plugin(post),
+            host => self.resolve_host(post, host),
+        }
+    }
+
+    fn resolve_host(&self, post: &Post, host: AudioHost) -> Result<ResolvedMedia> {
+        match host {
             AudioHost::Soundgasm => self.soundgasm(post),
             AudioHost::Whyp => self.whyp(post),
             AudioHost::Audiochan => self.audiochan(post),
             AudioHost::Hotaudio => Self::hotaudio(post),
-            AudioHost::Unknown => Err(err("the post carries no supported audio link")),
+            AudioHost::Unknown => Err(err(
+                "the post carries no supported audio link (install an `extract` extension for this site)",
+            )),
         }
+    }
+
+    /// Asks the first `extract` extension to turn the post into a plain HTTP
+    /// media URL. Hotaudio stays built in because it needs a decrypting stream,
+    /// not a URL.
+    fn plugin(&self, post: &Post) -> Result<ResolvedMedia> {
+        let plugin = extensions::Extensions::global()
+            .find(CAP_EXTRACT)
+            .ok_or_else(|| {
+                err("the post carries no supported audio link (install an `extract` extension for this site)")
+            })?;
+        let result = plugin
+            .call(
+                METHOD_EXTRACT_RESOLVE,
+                serde_json::json!({
+                    "url": post.url,
+                    "selftext": post.selftext,
+                    "title": post.title,
+                    "author": post.author,
+                }),
+            )
+            .map_err(|error| err(format!("{}: {error}", plugin.manifest.id)))?;
+        let media: PluginMedia = serde_json::from_value(result).map_err(|error| {
+            err(format!(
+                "{} returned an invalid result: {error}",
+                plugin.manifest.id
+            ))
+        })?;
+        self.http(media.url, media.headers.into_iter().collect())
+            .map(|mut resolved| {
+                resolved.duration_hint_ms = media.duration_ms;
+                resolved
+            })
     }
 
     fn http(&self, url: String, headers: Vec<(String, String)>) -> Result<ResolvedMedia> {
@@ -461,7 +522,7 @@ mod tests {
             url: "https://example.com/not-audio".into(),
             ..Default::default()
         };
-        match extractors.resolve_media(&post) {
+        match extractors.resolve_host(&post, AudioHost::Unknown) {
             Ok(_) => panic!("an unknown host should not resolve"),
             Err(error) => {
                 assert!(error.0.contains("no supported audio link"), "{}", error.0);

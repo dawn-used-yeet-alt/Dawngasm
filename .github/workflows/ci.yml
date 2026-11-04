@@ -75,5 +75,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: dawngasm-tui-x86_64-unknown-linux-gnu
-          path: target/release/dawngasm-tui
+          path: |
+            target/release/dawngasm-tui
+            target/release/dawngasm-plugin-clearance
           if-no-files-found: error

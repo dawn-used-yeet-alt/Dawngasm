@@ -1,6 +1,6 @@
 [package]
 name = "dawngasm-tui"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 rust-version = "1.89"
 license = "GPL-3.0-or-later"
@@ -15,12 +15,19 @@ path = "src/lib.rs"
 name = "dawngasm-tui"
 path = "src/main.rs"
 
+# The webview is a plugin, not part of the TUI: only this helper links the
+# platform webview. A headless build skips it entirely.
+[[bin]]
+name = "dawngasm-plugin-clearance"
+path = "src/bin/clearance.rs"
+required-features = ["webview"]
+
 [features]
 default = ["webview"]
-# A system-webview window for passing hotaudio's Cloudflare challenge. It uses
-# the OS webview (WebKitGTK, WKWebView, WebView2), not a bundled browser, but it
-# does add those system libraries to the build. `--no-default-features` keeps a
-# headless build that only needs the terminal and audio libraries.
+# Builds the bundled Cloudflare clearance plugin. The TUI itself never links
+# WebKitGTK, WKWebView or WebView2, so it starts without them; `C` needs the
+# plugin and its runtime. `--no-default-features` skips building the plugin,
+# while still allowing a separately installed one.
 webview = ["dep:wry", "dep:tao"]
 
 [dependencies]
@@ -59,10 +66,10 @@ thiserror = "2"
 # library is the only part this app uses.
 hotaudio = { package = "hotaudio-rs", git = "https://github.com/dawn-used-yeet-alt/hotaudio-extractor.git", rev = "3cccd2c9f127527e67bf5571134e88a735a86ef4", default-features = false }
 
-# System webview for the hotaudio Cloudflare clearance. `wry` renders with the
+# System webview for the bundled clearance plugin. `wry` renders with the
 # platform's own webview (WebKitGTK on Linux, WKWebView on macOS, WebView2 on
-# Windows); `tao` supplies the window and event loop around it. Both are behind
-# the default `webview` feature.
+# Windows); `tao` supplies the window and event loop around it. Only
+# `dawngasm-plugin-clearance` uses these, so the TUI binary does not link them.
 wry = { version = "0.57", optional = true }
 tao = { version = "0.37", default-features = false, features = ["rwh_06"], optional = true }
 
