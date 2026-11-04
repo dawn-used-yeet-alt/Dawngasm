@@ -65,15 +65,18 @@ pub fn run_clearance_process() -> Result<(), String> {
 
 /// Turns a dynamic-loader error into an install hint. The plugin is present but
 /// its webview runtime is not.
+///
+/// The toast is a single line, so the package names come first; the loader
+/// error is only useful when the hint does not apply.
 fn runtime_hint(message: &str) -> String {
     if !message.contains("libwebkit2gtk-4.1") && !message.contains("libjavascriptcoregtk-4.1") {
         return message.to_string();
     }
     #[cfg(target_os = "linux")]
-    let hint = "Install the webview runtime: `sudo pacman -S webkit2gtk-4.1` on Arch, `sudo apt install libwebkit2gtk-4.1-0` on Debian/Ubuntu, or `sudo dnf install webkit2gtk4.1` on Fedora.";
+    let hint = "WebKitGTK runtime missing: install webkit2gtk-4.1 (Arch), libwebkit2gtk-4.1-0 (Debian), webkit2gtk4.1 (Fedora)";
     #[cfg(not(target_os = "linux"))]
     let hint = "The system webview runtime is missing.";
-    format!("{message}\n{hint}")
+    hint.to_string()
 }
 
 #[cfg(test)]
@@ -94,6 +97,8 @@ mod tests {
         let message = runtime_hint(
             "./dawngasm-plugin-clearance: error while loading shared libraries: libwebkit2gtk-4.1.so.0: cannot open shared object file",
         );
+        // The toast truncates, so the package hint must lead.
+        assert!(message.starts_with("WebKitGTK runtime missing"));
         assert!(message.contains("webkit2gtk-4.1"));
     }
 
