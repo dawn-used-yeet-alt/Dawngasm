@@ -6,6 +6,7 @@
 
 pub mod audio;
 pub mod dawngasm;
+pub mod extensions;
 pub mod extractors;
 pub mod hotaudio_auth;
 #[cfg(target_os = "linux")]

@@ -71,8 +71,9 @@ jobs:
         run: |
           set -euo pipefail
           name="dawngasm-tui-${GITHUB_REF_NAME}-${{ matrix.target }}"
-          mkdir -p "dist/$name"
+          mkdir -p "dist/$name/plugins"
           cp "target/${{ matrix.target }}/release/dawngasm-tui" "dist/$name/"
+          cp "target/${{ matrix.target }}/release/dawngasm-plugin-clearance" "dist/$name/plugins/"
           cp LICENSE README.md THIRD_PARTY_LICENSES.md "dist/$name/"
           tar -czf "$name.tar.gz" -C dist "$name"
 
@@ -81,8 +82,9 @@ jobs:
         shell: pwsh
         run: |
           $name = "dawngasm-tui-${{ github.ref_name }}-${{ matrix.target }}"
-          New-Item -ItemType Directory -Force "dist/$name" | Out-Null
+          New-Item -ItemType Directory -Force "dist/$name/plugins" | Out-Null
           Copy-Item "target/${{ matrix.target }}/release/dawngasm-tui.exe" "dist/$name/"
+          Copy-Item "target/${{ matrix.target }}/release/dawngasm-plugin-clearance.exe" "dist/$name/plugins/"
           Copy-Item LICENSE, README.md, THIRD_PARTY_LICENSES.md "dist/$name/"
           Compress-Archive -Path "dist/$name/*" -DestinationPath "$name.zip"
 
