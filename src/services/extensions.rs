@@ -1598,7 +1598,8 @@ mod tests {
             description: String::new(),
             key: None,
         }];
-        let commands = loaded(vec![disabled, enabled]).commands();
+        let extensions = loaded(vec![disabled, enabled]);
+        let commands = extensions.commands();
         let ids: Vec<_> = commands
             .iter()
             .map(|command| command.command.id.as_str())

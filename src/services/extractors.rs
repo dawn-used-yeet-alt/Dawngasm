@@ -220,10 +220,7 @@ impl Extractors {
                 }
             }
         }
-        match first_error {
-            Some(error) => Err(err(error)),
-            None => Ok(None),
-        }
+        first_error.map_or_else(|| Ok(None), |error| Err(err(error)))
     }
 
     fn http(&self, url: String, headers: Vec<(String, String)>) -> Result<ResolvedMedia> {
