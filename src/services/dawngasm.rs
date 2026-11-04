@@ -42,7 +42,7 @@ const TAG_SUGGEST_LIMIT: usize = 10;
 const TAG_CACHE_PREFIXES: usize = 256;
 
 /// One autocomplete recommendation from `GET /tags`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct TagSuggestion {
     pub tag: String,
     pub count: i64,

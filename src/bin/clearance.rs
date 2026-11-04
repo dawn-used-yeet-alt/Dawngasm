@@ -26,7 +26,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(400);
 const TIMEOUT: Duration = Duration::from_secs(300);
 const CAPABILITY: &str = "clearance";
 const METHOD: &str = "clearance.capture";
-const PROTOCOL_VERSION: u32 = 1;
+const PROTOCOL_VERSION: u32 = 2;
 
 /// A desktop-browser user agent, set explicitly so the cookie is bound to a
 /// value this process knows. The actual `navigator.userAgent` is read back when
@@ -54,10 +54,16 @@ fn describe() {
     println!(
         "{}",
         json!({
+            "protocol": PROTOCOL_VERSION,
             "id": "clearance",
             "name": "Cloudflare clearance webview",
             "version": env!("CARGO_PKG_VERSION"),
-            "capabilities": [CAPABILITY],
+            "description": "Opens hotaudio in the system webview and returns the Cloudflare clearance cookie.",
+            "capabilities": [{
+                "name": CAPABILITY,
+                "methods": [METHOD],
+                "timeout_ms": 330_000,
+            }],
         })
     );
 }
@@ -66,16 +72,21 @@ fn run() {
     let request: Value = match serde_json::from_reader(io::stdin().lock()) {
         Ok(request) => request,
         Err(error) => {
-            respond_error(&format!("invalid request: {error}"));
+            respond_error("", "protocol", &format!("invalid request: {error}"));
             return;
         }
     };
+    let id = request
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
     let method = request
         .get("method")
         .and_then(Value::as_str)
         .unwrap_or_default();
     if method != METHOD {
-        respond_error(&format!("unknown method `{method}`"));
+        respond_error(&id, "unsupported", &format!("unknown method `{method}`"));
         return;
     }
     match capture_clearance() {
@@ -83,6 +94,7 @@ fn run() {
             "{}",
             json!({
                 "protocol": PROTOCOL_VERSION,
+                "id": id,
                 "ok": true,
                 "result": {
                     "cookie": clearance.cookie,
@@ -90,14 +102,19 @@ fn run() {
                 },
             })
         ),
-        Err(error) => respond_error(&error),
+        Err(error) => respond_error(&id, "plugin", &error),
     }
 }
 
-fn respond_error(message: &str) {
+fn respond_error(id: &str, code: &str, message: &str) {
     println!(
         "{}",
-        json!({ "protocol": PROTOCOL_VERSION, "ok": false, "error": message })
+        json!({
+            "protocol": PROTOCOL_VERSION,
+            "id": id,
+            "ok": false,
+            "error": {"code": code, "message": message},
+        })
     );
 }
 

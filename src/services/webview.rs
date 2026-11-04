@@ -32,15 +32,21 @@ struct Captured {
 /// or the clearance cannot be saved.
 pub fn capture_and_save() -> Result<PathBuf, String> {
     let extensions = Extensions::global();
-    let plugin = extensions.find(CAP_CLEARANCE).ok_or_else(|| {
-        extensions.failure(CAP_CLEARANCE).map_or_else(
-            || {
-                "no Cloudflare clearance extension is installed; put `dawngasm-plugin-clearance` in the plugins directory next to the app".to_string()
-            },
-            |failure| runtime_hint(&failure.error),
-        )
-    })?;
-    let result = plugin.call(METHOD_CLEARANCE_CAPTURE, json!({}))?;
+    let plugin = extensions
+        .find_for_method(CAP_CLEARANCE, METHOD_CLEARANCE_CAPTURE)
+        .ok_or_else(|| {
+            extensions
+                .failure(CAP_CLEARANCE)
+                .map_or_else(
+                    || {
+                        "no Cloudflare clearance extension is installed; put `dawngasm-plugin-clearance` in the plugins directory next to the app".to_string()
+                    },
+                    |failure| runtime_hint(&failure.error),
+                )
+        })?;
+    let result = plugin
+        .call(METHOD_CLEARANCE_CAPTURE, json!({}))
+        .map_err(|error| error.to_string())?;
     let captured: Captured = serde_json::from_value(result)
         .map_err(|error| format!("the clearance extension returned an invalid result: {error}"))?;
     if captured.cookie.trim().is_empty() {
