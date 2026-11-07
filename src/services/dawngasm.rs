@@ -4,11 +4,15 @@
 //! needs no credentials, no OAuth flow and no Reddit User-Agent: it asks the
 //! Worker at [`DEFAULT_API_BASE`] for one page at a time.
 //!
-//! A search response carries the post metadata but, historically, not the two
-//! fields this client needs to find a playable link (`url` and `selftext`).
-//! When those columns are absent the page is completed with one `/query`
+//! A search response carries the post metadata. When the `audio` column is present,
+//! playable audio links and hosts are extracted directly without secondary requests.
+//! When `audio` or `url`/`selftext` are absent, the page is completed with one `/query`
 //! request for the same ids. Both paths are supported so the client keeps
 //! working whichever revision of the API is deployed.
+//!
+//! For raw queries sent to `/query`, the database schema includes:
+//! - `post(id, subreddit, author, title, score, created_unix, url, selftext, ...)`
+//! - `post_audio(post_id, host, url, position)` where `position` is play priority (0 first).
 //!
 //! Tag autocomplete comes from `GET /tags?prefix=...`, the same endpoint the
 //! API's browser UI uses. Suggestions are cached for the life of the client so
@@ -22,7 +26,7 @@ use std::fmt::Write as _;
 
 use serde_json::Value;
 
-use crate::models::audio_host::find_audio_url;
+use crate::models::audio_host::{clean_url, find_audio_url, host_of_url, AudioHost};
 use crate::models::post::Post;
 
 /// The deployed Worker. Override with `DAWNGASM_API_URL` for a local
@@ -128,26 +132,43 @@ impl DawngasmClient {
         query: &str,
         page: usize,
     ) -> Result<(Vec<Post>, bool)> {
-        let mut url = format!(
-            "{}/search?limit={PAGE_LIMIT}&page={}&sort={}",
-            self.base,
-            page.min(MAX_PAGE_INDEX) + 1,
-            api_sort(sort)
+        self.fetch_posts_with_hosts(sort, period, tags, exclude_tags, "", "", query, page)
+    }
+
+    /// One page of the feed with audio host filtering.
+    ///
+    /// `hosts` is a comma-separated list of allowed hosts (OR filter);
+    /// `exclude_hosts` is a comma-separated list of hosts to drop. Both accept
+    /// canonical names (e.g. `soundgasm`, `whyp`, `audiochan`, `hotaudio`) or
+    /// domain names.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the API request fails or its response cannot be
+    /// decoded.
+    #[allow(clippy::too_many_arguments)]
+    pub fn fetch_posts_with_hosts(
+        &mut self,
+        sort: &str,
+        period: &str,
+        tags: &str,
+        exclude_tags: &str,
+        hosts: &str,
+        exclude_hosts: &str,
+        query: &str,
+        page: usize,
+    ) -> Result<(Vec<Post>, bool)> {
+        let url = build_search_url(
+            &self.base,
+            sort,
+            period,
+            tags,
+            exclude_tags,
+            hosts,
+            exclude_hosts,
+            query,
+            page,
         );
-        url.push_str("&window=");
-        url.push_str(api_window(period));
-        if !tags.is_empty() {
-            url.push_str("&tags=");
-            url.push_str(&percent_encode(tags));
-        }
-        if !exclude_tags.is_empty() {
-            url.push_str("&excludeTags=");
-            url.push_str(&percent_encode(exclude_tags));
-        }
-        if !query.is_empty() {
-            url.push_str("&text=");
-            url.push_str(&percent_encode(query));
-        }
 
         let response = self
             .agent
@@ -325,12 +346,14 @@ fn parse_search_response(body: &str) -> Result<SearchPage> {
     let created_col = column("created_unix");
     let url_col = column("url");
     let selftext_col = column("selftext");
+    let audio_col = column("audio");
 
     let rows = root
         .get("rows")
         .and_then(Value::as_array)
         .ok_or_else(|| err("dawngasm API response had no rows"))?;
 
+    let has_audio_col = audio_col.is_some();
     let mut posts = Vec::with_capacity(rows.len());
     for row in rows {
         let Some(row) = row.as_array() else {
@@ -341,6 +364,33 @@ fn parse_search_response(body: &str) -> Result<SearchPage> {
             continue;
         }
         let title = string_cell(row, title_col);
+
+        let mut url = url_col
+            .map(|index| string_cell(row, index))
+            .unwrap_or_default();
+        let selftext = selftext_col
+            .map(|index| string_cell(row, index))
+            .unwrap_or_default();
+
+        if let Some(audio_idx) = audio_col {
+            if let Some(audio_arr) = row.get(audio_idx).and_then(Value::as_array) {
+                for item in audio_arr {
+                    if let Some(audio_url) = item.get("url").and_then(Value::as_str) {
+                        let cleaned = clean_url(audio_url);
+                        let host_str = item.get("host").and_then(Value::as_str).unwrap_or("");
+                        let is_known = matches!(
+                            host_str.to_ascii_lowercase().as_str(),
+                            "soundgasm" | "whyp" | "audiochan" | "hotaudio"
+                        ) || host_of_url(&cleaned) != AudioHost::Unknown;
+                        if is_known && !cleaned.is_empty() {
+                            url = cleaned;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
         posts.push(Post {
             id: id.clone(),
             name: format!("t3_{id}"),
@@ -348,12 +398,8 @@ fn parse_search_response(body: &str) -> Result<SearchPage> {
             author: author_col
                 .map(|index| string_cell(row, index))
                 .unwrap_or_default(),
-            url: url_col
-                .map(|index| string_cell(row, index))
-                .unwrap_or_default(),
-            selftext: selftext_col
-                .map(|index| string_cell(row, index))
-                .unwrap_or_default(),
+            url,
+            selftext,
             score: int_cell(row, score_col),
             // The index does not store comment counts.
             num_comments: 0,
@@ -367,7 +413,7 @@ fn parse_search_response(body: &str) -> Result<SearchPage> {
             .get("hasMore")
             .and_then(Value::as_bool)
             .unwrap_or(false),
-        needs_bodies: url_col.is_none() || selftext_col.is_none(),
+        needs_bodies: !has_audio_col && (url_col.is_none() || selftext_col.is_none()),
     })
 }
 
@@ -471,6 +517,105 @@ fn int_cell(row: &[Value], index: Option<usize>) -> i64 {
 #[must_use]
 pub fn is_audio_post(post: &Post) -> bool {
     find_audio_url(post).is_some()
+}
+
+/// Builds the `/search` URL with query, tags, sort, window, and host filters.
+#[allow(clippy::too_many_arguments)]
+fn build_search_url(
+    base: &str,
+    sort: &str,
+    period: &str,
+    tags: &str,
+    exclude_tags: &str,
+    hosts: &str,
+    exclude_hosts: &str,
+    query: &str,
+    page: usize,
+) -> String {
+    let (clean_query, combined_hosts, combined_exclude_hosts) =
+        parse_query_filters(query, hosts, exclude_hosts);
+
+    let mut url = format!(
+        "{base}/search?limit={PAGE_LIMIT}&page={}&sort={}",
+        page.min(MAX_PAGE_INDEX) + 1,
+        api_sort(sort)
+    );
+    url.push_str("&window=");
+    url.push_str(api_window(period));
+    if !tags.is_empty() {
+        url.push_str("&tags=");
+        url.push_str(&percent_encode(tags));
+    }
+    if !exclude_tags.is_empty() {
+        url.push_str("&excludeTags=");
+        url.push_str(&percent_encode(exclude_tags));
+    }
+    if !combined_hosts.is_empty() {
+        url.push_str("&hosts=");
+        url.push_str(&percent_encode(&combined_hosts));
+    }
+    if !combined_exclude_hosts.is_empty() {
+        url.push_str("&excludeHosts=");
+        url.push_str(&percent_encode(&combined_exclude_hosts));
+    }
+    if !clean_query.is_empty() {
+        url.push_str("&text=");
+        url.push_str(&percent_encode(&clean_query));
+    }
+    url
+}
+
+/// Parses inline `host:` and `-host:` tokens out of search text, combining
+/// them with any explicitly provided host filters.
+fn parse_query_filters(query: &str, hosts: &str, exclude_hosts: &str) -> (String, String, String) {
+    let mut clean_words = Vec::new();
+    let mut host_list: Vec<String> = if hosts.is_empty() {
+        Vec::new()
+    } else {
+        hosts
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .collect()
+    };
+    let mut exclude_host_list: Vec<String> = if exclude_hosts.is_empty() {
+        Vec::new()
+    } else {
+        exclude_hosts
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .collect()
+    };
+
+    for word in query.split_whitespace() {
+        let lower = word.to_ascii_lowercase();
+        if let Some(host) = lower.strip_prefix("-host:") {
+            let host = host.trim();
+            if !host.is_empty()
+                && !exclude_host_list
+                    .iter()
+                    .any(|h| h.eq_ignore_ascii_case(host))
+            {
+                exclude_host_list.push(host.to_string());
+            }
+        } else if let Some(host) = lower.strip_prefix("host:") {
+            let host = host.trim();
+            if !host.is_empty() && !host_list.iter().any(|h| h.eq_ignore_ascii_case(host)) {
+                host_list.push(host.to_string());
+            }
+        } else {
+            clean_words.push(word);
+        }
+    }
+
+    (
+        clean_words.join(" "),
+        host_list.join(","),
+        exclude_host_list.join(","),
+    )
 }
 
 /// The percent-encoding `GLib`'s `Uri.escape_string(url, "", false)` applied:
@@ -658,5 +803,81 @@ mod tests {
             r#"{"error":"rate limit exceeded — slow down","retryAfterSeconds":4}"#,
         );
         assert!(message.contains("retry in 4s"), "{message}");
+    }
+
+    #[test]
+    fn parses_a_search_page_with_audio_column_without_needing_bodies() {
+        let body = r#"{
+            "columns": ["id","title","subreddit","author","score","created","created_unix","audio"],
+            "rows": [
+                ["abc","[F4M] One","gonewildaudio","alice",12,"2026-10-12 08:00:00",1791938952,[
+                    {"host":"soundgasm","url":"https://soundgasm.net/u/alice/one"}
+                ]],
+                ["def","Script only","gonewildaudio","bob",1,"2026-10-12 08:01:00",1791938962,[]],
+                ["ghi","[F4M] Two","GWASapphic","carol",99,"2026-10-12 08:02:00",1791938972,[
+                    {"host":"whyp","url":"https://whyp.it/tracks/two"}
+                ]]
+            ],
+            "hasMore": true,
+            "mode": "scan",
+            "page": 1
+        }"#;
+
+        let mut page = parse_search_response(body).unwrap();
+        assert!(!page.needs_bodies);
+        assert!(page.has_more);
+        assert_eq!(page.posts.len(), 3);
+        assert_eq!(page.posts[0].url, "https://soundgasm.net/u/alice/one");
+        assert_eq!(page.posts[1].url, "");
+        assert_eq!(page.posts[2].url, "https://whyp.it/tracks/two");
+
+        page.posts.retain(is_audio_post);
+        assert_eq!(page.posts.len(), 2, "script-only post should be dropped");
+        assert_eq!(page.posts[0].id, "abc");
+        assert_eq!(page.posts[1].id, "ghi");
+        assert_eq!(
+            find_audio_url(&page.posts[0]).as_deref(),
+            Some("https://soundgasm.net/u/alice/one")
+        );
+    }
+
+    #[test]
+    fn builds_search_url_with_hosts_and_exclude_hosts() {
+        let url = build_search_url(
+            "https://example.com",
+            "top",
+            "week",
+            "f4m",
+            "m4f",
+            "soundgasm,whyp",
+            "audiochan",
+            "rain",
+            0,
+        );
+        assert!(url.contains("/search?limit=100&page=1&sort=top&window=7d"));
+        assert!(url.contains("&tags=f4m"));
+        assert!(url.contains("&excludeTags=m4f"));
+        assert!(url.contains("&hosts=soundgasm%2Cwhyp"));
+        assert!(url.contains("&excludeHosts=audiochan"));
+        assert!(url.contains("&text=rain"));
+    }
+
+    #[test]
+    fn builds_search_url_extracting_inline_host_filters() {
+        let url = build_search_url(
+            "https://example.com",
+            "top",
+            "all",
+            "",
+            "",
+            "",
+            "",
+            "rain host:soundgasm -host:whyp sleep",
+            1,
+        );
+        assert!(url.contains("page=2"));
+        assert!(url.contains("&hosts=soundgasm"));
+        assert!(url.contains("&excludeHosts=whyp"));
+        assert!(url.contains("&text=rain%20sleep"));
     }
 }
