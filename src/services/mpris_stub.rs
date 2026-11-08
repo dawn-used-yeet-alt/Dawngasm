@@ -33,11 +33,12 @@ pub enum PlaybackStatus {
 pub struct Mpris;
 
 impl Mpris {
-    pub fn start() -> Option<Mpris> {
+    #[must_use]
+    pub const fn start() -> Option<Self> {
         None
     }
 
-    pub fn update(
+    pub const fn update(
         &self,
         _status: PlaybackStatus,
         _position_ms: i64,
@@ -48,7 +49,8 @@ impl Mpris {
     ) {
     }
 
-    pub fn poll(&self) -> Vec<Command> {
+    #[must_use]
+    pub const fn poll(&self) -> Vec<Command> {
         Vec::new()
     }
 }
