@@ -137,6 +137,14 @@ plain URL.
 
 Method: `clearance.capture`
 
+Params (optional):
+
+```json
+{"target": "audiochan"}
+```
+
+When omitted, `target` defaults to `"hotaudio"`.
+
 Result:
 
 ```json

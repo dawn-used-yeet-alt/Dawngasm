@@ -30,6 +30,7 @@ use crate::models::post::Post;
 
 use super::audio::hotaudio::HotaudioMediaSource;
 use super::audio::http_source::HttpMediaSource;
+use super::audiochan_auth::AudiochanClearance;
 use super::extensions::{self, Extension, CAP_EXTRACT, METHOD_EXTRACT_RESOLVE};
 use super::hotaudio_auth::HotaudioClearance;
 
@@ -275,6 +276,9 @@ impl Extractors {
     /// intent (which sets the playback cookie), exchange that for a signed
     /// stream URL, then stream it with the origin/referer the CDN checks.
     ///
+    /// When Cloudflare Turnstile verification is required, a saved clearance
+    /// cookie and user agent are attached to the API calls and stream request.
+    ///
     /// The API moves, so both slug lookup methods are supported: the current
     /// deployment answers `GET /audios/slug/{slug}`, while older ones used
     /// `POST` for the same route. A 404/405 from GET is therefore retried as a
@@ -285,34 +289,76 @@ impl Extractors {
         let slug =
             extract_audiochan_slug(&page_url).ok_or_else(|| err("audiochan slug not found"))?;
 
-        let metadata = self.audiochan_metadata(&slug)?;
+        let clearance = AudiochanClearance::load_default();
+        let user_agent = clearance
+            .as_ref()
+            .map(|c| c.user_agent.trim())
+            .filter(|ua| !ua.is_empty())
+            .unwrap_or(BROWSER_UA);
+        let clearance_cookie = clearance
+            .as_ref()
+            .map(|c| c.cookie.trim())
+            .filter(|c| !c.is_empty());
+
+        let metadata = self.audiochan_metadata(&slug, user_agent, clearance_cookie)?;
+
+        if let Some(file_url) = parse_audiochan_file_url(&metadata) {
+            let mut headers = vec![
+                ("Origin".into(), AUDIOCHAN_ORIGIN.into()),
+                ("Referer".into(), AUDIOCHAN_REFERER.into()),
+                ("User-Agent".into(), user_agent.to_string()),
+            ];
+            if let Some(cookie) = clearance_cookie {
+                headers.push(("Cookie".into(), cookie.to_string()));
+            }
+            return self.http(file_url, headers);
+        }
+
         let audio_id = parse_audiochan_field(&metadata, "id")
             .ok_or_else(|| err("audiochan audio id not found"))?;
+        let file_id = parse_audiochan_file_id(&metadata);
 
-        // A play intent sets the __Secure-audiochan_playback cookie the stream
-        // call below needs. 404 means the track predates intents and streams
-        // without one.
-        let play_intent = match self.post_json_response(
+        let intent_body = file_id
+            .as_ref()
+            .map(|id| serde_json::json!({ "file_id": id }).to_string());
+        let (intent_status, intent_body_resp) = self.audiochan_api_call(
             &format!("{AUDIOCHAN_API}/audios/{audio_id}/play-intent"),
-            None,
-        )? {
-            (200, body) => Some(
-                parse_audiochan_field(&body, "play_intent")
+            "POST",
+            intent_body.as_deref(),
+            user_agent,
+            clearance_cookie,
+        )?;
+        let play_intent = match intent_status {
+            200 => Some(
+                parse_audiochan_field(&intent_body_resp, "play_intent")
                     .ok_or_else(|| err("audiochan play intent not found"))?,
             ),
-            (404, _) => None,
-            (status, _) => {
+            403 => return Err(audiochan_verification_error(clearance_cookie.is_some())),
+            404 => None,
+            status => {
                 return Err(err(format!("audiochan play intent returned HTTP {status}")));
             }
         };
 
-        let stream_body = play_intent
-            .as_ref()
-            .map(|intent| serde_json::json!({ "play_intent": intent }).to_string());
-        let (status, stream_json) = self.post_json_response(
+        let mut stream_payload_obj = serde_json::Map::new();
+        if let Some(intent) = play_intent {
+            stream_payload_obj.insert("play_intent".to_string(), Value::String(intent));
+        }
+        if let Some(fid) = file_id {
+            stream_payload_obj.insert("file_id".to_string(), Value::String(fid));
+        }
+        let stream_body = Value::Object(stream_payload_obj).to_string();
+
+        let (status, stream_json) = self.audiochan_api_call(
             &format!("{AUDIOCHAN_API}/audios/{audio_id}/stream-url"),
-            stream_body.as_deref(),
+            "POST",
+            Some(&stream_body),
+            user_agent,
+            clearance_cookie,
         )?;
+        if status == 403 {
+            return Err(audiochan_verification_error(clearance_cookie.is_some()));
+        }
         if status != 200 {
             return Err(err(format!(
                 "audiochan stream url returned HTTP {status}: {}",
@@ -322,31 +368,47 @@ impl Extractors {
         let stream_url = parse_audiochan_field(&stream_json, "url")
             .ok_or_else(|| err("audiochan stream url not found"))?;
 
-        self.http(
-            stream_url,
-            vec![
-                ("Origin".into(), AUDIOCHAN_ORIGIN.into()),
-                ("Referer".into(), AUDIOCHAN_REFERER.into()),
-            ],
-        )
+        let mut headers = vec![
+            ("Origin".into(), AUDIOCHAN_ORIGIN.into()),
+            ("Referer".into(), AUDIOCHAN_REFERER.into()),
+            ("User-Agent".into(), user_agent.to_string()),
+        ];
+        if let Some(cookie) = clearance_cookie {
+            headers.push(("Cookie".into(), cookie.to_string()));
+        }
+
+        self.http(stream_url, headers)
     }
 
     /// Resolves an audiochan slug with the current GET route, falling back to
     /// the older POST route when the deployment does not expose GET.
-    fn audiochan_metadata(&self, slug: &str) -> Result<String> {
+    fn audiochan_metadata(
+        &self,
+        slug: &str,
+        user_agent: &str,
+        clearance_cookie: Option<&str>,
+    ) -> Result<String> {
         let url = format!("{AUDIOCHAN_API}/audios/slug/{slug}");
-        let (get_status, get_body) = self.get_response(&url)?;
+        let (get_status, get_body) =
+            self.audiochan_api_call(&url, "GET", None, user_agent, clearance_cookie)?;
         if get_status == 200 {
             return Ok(get_body);
         }
         if matches!(get_status, 404 | 405) {
-            let (post_status, post_body) = self.post_json_response(&url, None)?;
+            let (post_status, post_body) =
+                self.audiochan_api_call(&url, "POST", None, user_agent, clearance_cookie)?;
             if post_status == 200 {
                 return Ok(post_body);
+            }
+            if post_status == 403 {
+                return Err(audiochan_verification_error(clearance_cookie.is_some()));
             }
             return Err(err(format!(
                 "audiochan slug lookup returned HTTP {get_status} (GET) and {post_status} (POST)"
             )));
+        }
+        if get_status == 403 {
+            return Err(audiochan_verification_error(clearance_cookie.is_some()));
         }
         Err(err(format!(
             "audiochan slug lookup returned HTTP {get_status}: {}",
@@ -372,19 +434,50 @@ impl Extractors {
         })
     }
 
-    /// Posts JSON and returns the status plus response body, with the
-    /// origin/referer audiochan's API checks for.
-    fn post_json_response(&self, url: &str, body: Option<&str>) -> Result<(u16, String)> {
-        let response = self
-            .agent
-            .post(url)
-            .header("Origin", AUDIOCHAN_ORIGIN)
-            .header("Referer", AUDIOCHAN_REFERER)
-            .header("Content-Type", "application/json")
-            // ureq only offers a body-carrying POST builder, so the body-less
-            // case sends an empty payload.
-            .send(body.unwrap_or_default())
-            .map_err(|e| err(format!("{url} failed: {e}")))?;
+    /// Performs an audiochan API HTTP call with origin, referer, user-agent,
+    /// and optional clearance cookie headers.
+    fn audiochan_api_call(
+        &self,
+        url: &str,
+        method: &str,
+        body: Option<&str>,
+        user_agent: &str,
+        clearance_cookie: Option<&str>,
+    ) -> Result<(u16, String)> {
+        let response = if method == "POST" {
+            let mut request = self
+                .agent
+                .post(url)
+                .header("User-Agent", user_agent)
+                .header("Origin", AUDIOCHAN_ORIGIN)
+                .header("Referer", AUDIOCHAN_REFERER)
+                .header("Accept", "application/json")
+                .header("Content-Type", "application/json");
+            if let Some(cookie) = clearance_cookie {
+                if !cookie.trim().is_empty() {
+                    request = request.header("Cookie", cookie);
+                }
+            }
+            request
+                .send(body.unwrap_or_default())
+                .map_err(|e| err(format!("{url} failed: {e}")))?
+        } else {
+            let mut request = self
+                .agent
+                .get(url)
+                .header("User-Agent", user_agent)
+                .header("Origin", AUDIOCHAN_ORIGIN)
+                .header("Referer", AUDIOCHAN_REFERER)
+                .header("Accept", "application/json");
+            if let Some(cookie) = clearance_cookie {
+                if !cookie.trim().is_empty() {
+                    request = request.header("Cookie", cookie);
+                }
+            }
+            request
+                .call()
+                .map_err(|e| err(format!("{url} failed: {e}")))?
+        };
         let status = response.status().as_u16();
         let body = response
             .into_body()
@@ -403,6 +496,14 @@ fn hotaudio_error(error: &std::io::Error) -> Error {
         ))
     } else {
         err(message)
+    }
+}
+
+fn audiochan_verification_error(has_clearance: bool) -> Error {
+    if has_clearance {
+        err("audiochan verification expired — press C to open the clearance window")
+    } else {
+        err("audiochan needs browser verification — press C to open the clearance window")
     }
 }
 
@@ -495,6 +596,38 @@ pub fn parse_audiochan_field(json_data: &str, field: &str) -> Option<String> {
         .map(std::string::ToString::to_string)
 }
 
+/// Reads `audioFile.id` from the audiochan slug response when present.
+#[must_use]
+pub fn parse_audiochan_file_id(json_data: &str) -> Option<String> {
+    let root: Value = serde_json::from_str(json_data).ok()?;
+    let from_obj = |obj: &Value| -> Option<String> {
+        let file = obj.get("audioFile").or_else(|| obj.get("audio_file"))?;
+        let id = file.get("id")?.as_str()?;
+        if id.is_empty() || id == "null" {
+            None
+        } else {
+            Some(id.to_string())
+        }
+    };
+    from_obj(&root).or_else(|| root.get("data").and_then(from_obj))
+}
+
+/// Reads `audioFile.url` from the audiochan slug response when present.
+#[must_use]
+pub fn parse_audiochan_file_url(json_data: &str) -> Option<String> {
+    let root: Value = serde_json::from_str(json_data).ok()?;
+    let from_obj = |obj: &Value| -> Option<String> {
+        let file = obj.get("audioFile").or_else(|| obj.get("audio_file"))?;
+        let url = file.get("url")?.as_str()?;
+        if url.is_empty() || url == "null" {
+            None
+        } else {
+            Some(url.to_string())
+        }
+    };
+    from_obj(&root).or_else(|| root.get("data").and_then(from_obj))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -557,6 +690,45 @@ mod tests {
         );
         assert_eq!(parse_audiochan_field("not json", "id"), None);
         assert_eq!(parse_audiochan_field(r#"{"other":1}"#, "id"), None);
+    }
+
+    #[test]
+    fn reads_audiochan_file_id() {
+        let json = r#"{"audioFile":{"id":"file_123","url":null}}"#;
+        assert_eq!(parse_audiochan_file_id(json).as_deref(), Some("file_123"));
+        let snake_case = r#"{"audio_file":{"id":"file_456"}}"#;
+        assert_eq!(
+            parse_audiochan_file_id(snake_case).as_deref(),
+            Some("file_456")
+        );
+        let nested = r#"{"data":{"audioFile":{"id":"file_789"}}}"#;
+        assert_eq!(parse_audiochan_file_id(nested).as_deref(), Some("file_789"));
+        assert_eq!(
+            parse_audiochan_file_id(r#"{"audioFile":{"id":null}}"#),
+            None
+        );
+        assert_eq!(parse_audiochan_file_id(r#"{"audioFile":{"id":""}}"#), None);
+        assert_eq!(parse_audiochan_file_id("{}"), None);
+    }
+
+    #[test]
+    fn reads_audiochan_file_url_when_public() {
+        let json = r#"{"audioFile":{"id":"x","url":"https://cdn.audiochan.com/file.m4a"}}"#;
+        assert_eq!(
+            parse_audiochan_file_url(json).as_deref(),
+            Some("https://cdn.audiochan.com/file.m4a")
+        );
+        let nested =
+            r#"{"data":{"audio_file":{"id":"x","url":"https://cdn.audiochan.com/nested.m4a"}}}"#;
+        assert_eq!(
+            parse_audiochan_file_url(nested).as_deref(),
+            Some("https://cdn.audiochan.com/nested.m4a")
+        );
+        assert_eq!(
+            parse_audiochan_file_url(r#"{"audioFile":{"url":null}}"#),
+            None
+        );
+        assert_eq!(parse_audiochan_file_url("{}"), None);
     }
 
     #[test]
