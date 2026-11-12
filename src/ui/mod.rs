@@ -574,7 +574,7 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         ("e", "cycle the time window (switches sort to top)"),
         ("r", "reload the current page"),
         ("x / i", "export / import the library file"),
-        ("C", "open hotaudio in a webview for Cloudflare clearance"),
+        ("C", "open hotaudio or audiochan in a webview for clearance"),
         ("q, Ctrl-c", "quit"),
     ];
     // +2 for the border, +2 so a wrapped row never pushes the last key out.

@@ -5,6 +5,7 @@
 //! ever sees values that have already been produced; nothing blocks it.
 
 pub mod audio;
+pub mod audiochan_auth;
 pub mod dawngasm;
 pub mod extensions;
 pub mod extractors;

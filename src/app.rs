@@ -1213,17 +1213,34 @@ impl App {
         }
     }
 
-    // --- hotaudio clearance ------------------------------------------------
+    // --- clearance ---------------------------------------------------------
 
     /// Opens the system webview in a child process, waits for the Cloudflare
-    /// challenge, and saves the cookie/UA pair for the next hotaudio resolve.
+    /// or Turnstile challenge, and saves the clearance pair for the selected host
+    /// (audiochan or hotaudio).
     fn capture_cloudflare_clearance(&mut self) {
-        match crate::services::webview::run_clearance_process() {
+        let target = self
+            .selected_post()
+            .map(|post| crate::models::audio_host::detect_host(&post))
+            .map_or(
+                crate::services::webview::ClearanceTarget::Hotaudio,
+                |host| match host {
+                    crate::models::audio_host::AudioHost::Audiochan => {
+                        crate::services::webview::ClearanceTarget::Audiochan
+                    }
+                    _ => crate::services::webview::ClearanceTarget::Hotaudio,
+                },
+            );
+        let label = match target {
+            crate::services::webview::ClearanceTarget::Audiochan => "audiochan",
+            crate::services::webview::ClearanceTarget::Hotaudio => "hotaudio",
+        };
+        match crate::services::webview::run_clearance_process_target(target) {
             Ok(()) => self.set_toast(
-                "Cloudflare clearance saved for hotaudio. Press Enter to retry.",
+                format!("Clearance saved for {label}. Press Enter to retry."),
                 false,
             ),
-            Err(error) => self.set_toast(format!("Cloudflare clearance: {error}"), true),
+            Err(error) => self.set_toast(format!("{label} clearance: {error}"), true),
         }
     }
 

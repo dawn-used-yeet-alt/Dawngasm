@@ -1,21 +1,41 @@
-//! The hotaudio Cloudflare clearance extension.
+//! The Cloudflare clearance extension for hotaudio and audiochan.
 //!
 //! The webview itself ships as `dawngasm-plugin-clearance`, a separate
 //! executable. Keeping it out of the TUI means the player never links
 //! `WebKitGTK`, `WKWebView` or `WebView2`, so it starts on machines without a
 //! webview runtime. Pressing `C` is the only action that needs the plugin.
 //!
-//! The plugin answers `clearance.capture` with the `cf_clearance` cookie and
-//! the exact user agent that earned it; this module saves the pair.
+//! The plugin answers `clearance.capture` with the clearance cookie and
+//! the exact user agent that earned it; this module saves the pair for either
+//! hotaudio or audiochan depending on the requested target.
 
 use std::path::PathBuf;
 
 use serde::Deserialize;
 use serde_json::json;
 
+use crate::services::audiochan_auth::AudiochanClearance;
 use crate::services::extensions::{Extensions, CAP_CLEARANCE, METHOD_CLEARANCE_CAPTURE};
 use crate::services::hotaudio_auth::HotaudioClearance;
 use crate::services::storage::Storage;
+
+/// The host requiring verification clearance.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub enum ClearanceTarget {
+    #[default]
+    Hotaudio,
+    Audiochan,
+}
+
+impl ClearanceTarget {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Hotaudio => "hotaudio",
+            Self::Audiochan => "audiochan",
+        }
+    }
+}
 
 #[derive(Deserialize)]
 struct Captured {
@@ -24,13 +44,13 @@ struct Captured {
     user_agent: String,
 }
 
-/// Opens the clearance plugin, waits for `cf_clearance`, and saves the pair.
+/// Opens the clearance plugin for `target`, waits for verification, and saves the pair.
 ///
 /// # Errors
 ///
 /// Returns an error when no clearance extension is installed, the plugin fails,
 /// or the clearance cannot be saved.
-pub fn capture_and_save() -> Result<PathBuf, String> {
+pub fn capture_and_save_target(target: ClearanceTarget) -> Result<PathBuf, String> {
     let extensions = Extensions::global();
     let plugin = extensions
         .find_for_method(CAP_CLEARANCE, METHOD_CLEARANCE_CAPTURE)
@@ -45,7 +65,10 @@ pub fn capture_and_save() -> Result<PathBuf, String> {
                 )
         })?;
     let result = plugin
-        .call(METHOD_CLEARANCE_CAPTURE, json!({}))
+        .call(
+            METHOD_CLEARANCE_CAPTURE,
+            json!({ "target": target.as_str() }),
+        )
         .map_err(|error| error.to_string())?;
     let captured: Captured = serde_json::from_value(result)
         .map_err(|error| format!("the clearance extension returned an invalid result: {error}"))?;
@@ -54,19 +77,42 @@ pub fn capture_and_save() -> Result<PathBuf, String> {
     }
     let dir = Storage::default_dir()
         .map_err(|error| format!("could not find the data directory: {error}"))?;
-    HotaudioClearance::new(captured.cookie, captured.user_agent)
-        .save(&dir)
-        .map_err(|error| format!("could not save the clearance: {error}"))
+    match target {
+        ClearanceTarget::Hotaudio => HotaudioClearance::new(captured.cookie, captured.user_agent)
+            .save(&dir)
+            .map_err(|error| format!("could not save hotaudio clearance: {error}")),
+        ClearanceTarget::Audiochan => AudiochanClearance::new(captured.cookie, captured.user_agent)
+            .save(&dir)
+            .map_err(|error| format!("could not save audiochan clearance: {error}")),
+    }
 }
 
-/// Runs the clearance extension and discards the saved path.
+/// Opens the clearance plugin for hotaudio (backwards compatibility).
 ///
 /// # Errors
 ///
-/// See [`capture_and_save`].
-pub fn run_clearance_process() -> Result<(), String> {
-    capture_and_save()?;
+/// See [`capture_and_save_target`].
+pub fn capture_and_save() -> Result<PathBuf, String> {
+    capture_and_save_target(ClearanceTarget::Hotaudio)
+}
+
+/// Runs the clearance extension for `target` and discards the saved path.
+///
+/// # Errors
+///
+/// See [`capture_and_save_target`].
+pub fn run_clearance_process_target(target: ClearanceTarget) -> Result<(), String> {
+    capture_and_save_target(target)?;
     Ok(())
+}
+
+/// Runs the clearance extension for hotaudio and discards the saved path.
+///
+/// # Errors
+///
+/// See [`capture_and_save_target`].
+pub fn run_clearance_process() -> Result<(), String> {
+    run_clearance_process_target(ClearanceTarget::Hotaudio)
 }
 
 /// Turns a dynamic-loader error into an install hint. The plugin is present but
@@ -96,6 +142,12 @@ mod tests {
                 .unwrap();
         assert_eq!(captured.cookie, "cf_clearance=x");
         assert_eq!(captured.user_agent, "Mozilla/5.0");
+    }
+
+    #[test]
+    fn clearance_target_as_str() {
+        assert_eq!(ClearanceTarget::Hotaudio.as_str(), "hotaudio");
+        assert_eq!(ClearanceTarget::Audiochan.as_str(), "audiochan");
     }
 
     #[cfg(target_os = "linux")]

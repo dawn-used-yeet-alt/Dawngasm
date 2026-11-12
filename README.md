@@ -43,13 +43,14 @@ sort, `e` changes the time window, and `s` saves a post.
 
 ### hotaudio and Cloudflare
 
-hotaudio is sometimes gated by a Cloudflare challenge. Press `C` to run the
-`dawngasm-plugin-clearance` extension, which opens hotaudio's home page in a
-small system-webview window. Pass the challenge, and Dawngasm saves the
-resulting `cf_clearance` cookie together with the exact browser user agent it
-was issued to. The pair is stored in `hotaudio-clearance.json` in the data
-directory (`~/.local/share/dawngasm` on Linux, `%APPDATA%\dawngasm` on Windows).
-`HOTAUDIO_COOKIE` and `HOTAUDIO_USER_AGENT` override the saved values for a
+hotaudio and audiochan can require browser verification (Cloudflare challenge
+or Turnstile). Press `C` to run the `dawngasm-plugin-clearance` extension, which
+opens the host in a system-webview window. Pass the check, and Dawngasm saves the
+resulting clearance cookies together with the exact browser user agent it was
+issued to. The pair is stored in `hotaudio-clearance.json` or
+`audiochan-clearance.json` in the data directory (`~/.local/share/dawngasm` on
+Linux, `%APPDATA%\dawngasm` on Windows). `HOTAUDIO_COOKIE` / `HOTAUDIO_USER_AGENT`
+and `AUDIOCHAN_COOKIE` / `AUDIOCHAN_USER_AGENT` override the saved values for a
 single run.
 
 The release archive keeps the plugin in `plugins/`. Its runtime packages are
