@@ -4,6 +4,12 @@ A terminal browser and player for audio posts on Reddit. It reads the dawngasm
 index, keeps posts that resolve to a playable link, and plays tracks from
 hotaudio, whyp, soundgasm, and audiochan.
 
+# Android/iOS
+
+I personally mostly use the mobile app so it's more frequently updated, up on features and (imo) looks and works much better.
+You can check it out [here](https://github.com/dawn-used-yeet-alt/Dawngasm-Android).
+I'd recommend the mobile app to this TUI app.
+
 ## Installation
 
 Prebuilt binaries for Linux, macOS, and Windows are on the
@@ -51,28 +57,6 @@ The release archive keeps the plugin in `plugins/`. Its runtime packages are
 `webkit2gtk4.1` on Fedora. Without them the rest of the app still works; `C`
 reports that the webview runtime is missing.
 
-## Extensions
-
-Dawngasm extensions are separate executables named `dawngasm-plugin-*`. They
-add audio hosts, feed sources, post filters and badges, Cloudflare clearance,
-and user-invokable commands without rebuilding the TUI. Plugins speak JSON over
-stdin/stdout, so they are independent of the host's compiler and crate versions
-and a crash cannot take the player down.
-
-Discovery, the manifest and protocol, every capability, and a minimal example
-are in [EXTENSIONS.md](EXTENSIONS.md). The short version:
-
-- `plugin --describe` prints a manifest; `plugin run` reads one JSON request
-  and writes one JSON response.
-- `extract` plugins can match hosts, decline with `handled: false`, and opt in
-  to overriding a built-in extractor.
-- `feed`, `post.filter` and `post.enrich` plugins can replace or post-process
-  the feed; `command` plugins appear in the `:` palette.
-- `dawngasm-tui extensions list` shows what was found and what failed, and
-  `dawngasm-tui extensions call ...` invokes a method by hand.
-- Every call has a timeout and an output cap, so a hung or flooding plugin is
-  killed rather than freezing the app. Clearance is the exception: it runs
-  synchronously because the system webview must own the UI thread.
 
 ## License
 
